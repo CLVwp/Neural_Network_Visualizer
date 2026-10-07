@@ -27,11 +27,13 @@ def live_load(graph, model) -> None:
 def _parse_bytes(data: bytes):
     """Returns (graph, module_or_None)."""
     import torch
-    from .parsers import parse_module, parse_onnx, parse_state_dict
+    from .parsers import parse_hf, parse_module, parse_onnx, parse_state_dict
 
     fmt = detect_bytes(data[:16])
     if fmt == "onnx":
         return parse_onnx(onnx_load(io.BytesIO(data))), None
+    if fmt == "hf":
+        return parse_hf(data), None            # header only; config.json is not uploaded
     if fmt == "torch":
         try:
             obj = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
@@ -47,7 +49,7 @@ def _parse_bytes(data: bytes):
             return g, None
         raise ValueError(f"unsupported torch content: {type(obj).__name__}")
     raise ValueError(f"unknown or unsupported format (detected: {fmt}). "
-                     "Supported: PyTorch (.pth/.pt), ONNX (.onnx).")
+                     "Supported: PyTorch (.pth/.pt), ONNX (.onnx), HuggingFace (.safetensors).")
 
 
 def onnx_load(buf):
@@ -92,7 +94,7 @@ class Handler(SimpleHTTPRequestHandler):
             g, model = _parse_bytes(self.rfile.read(size))
             _STATE["model"] = model          # retained for live runs
             _STATE["graph"] = None           # the client renders what it just received
-            g.meta["model_type"] = classify(g)
+            g.meta.setdefault("model_type", classify(g))
             layout(g)
             body = json.dumps({"graph": g.to_dict()}).encode()
             self._send(200, body, "application/json")

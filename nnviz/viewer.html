@@ -24,6 +24,15 @@
   #theme { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); cursor: pointer;
            background: var(--panel); color: var(--text); border: 1px solid var(--border);
            border-radius: 8px; padding: 6px 12px; font-size: 12px; }
+  #nav { position: fixed; top: 48px; left: 50%; transform: translateX(-50%); z-index: 6;
+         display: flex; gap: 8px; align-items: center; background: var(--panel);
+         color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+         padding: 6px 10px; font-size: 12px; }
+  #nav button { cursor: pointer; background: var(--border); color: var(--text); border: 0;
+                border-radius: 6px; padding: 5px 10px; font-size: 12px; }
+  #nav select { max-width: 210px; background: var(--bg); color: var(--text);
+                border: 1px solid var(--border); border-radius: 6px; padding: 4px; font-size: 12px; }
+  #nav input[type=range] { width: 110px; accent-color: var(--accent); }
   #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
           background: rgba(11, 14, 20, 0.85); color: var(--accent); font-size: 22px; z-index: 10;
           border: 3px dashed var(--accent); border-radius: 12px; margin: 10px; }
@@ -44,6 +53,13 @@
 <body>
 <div id="meta"></div>
 <div id="theme"></div>
+<div id="nav">
+  <button id="foldall">Fold all</button>
+  <button id="unfoldall">Unfold all</button>
+  <select id="lyrsel"><option value="">jump to layer…</option></select>
+  <label style="display:flex;align-items:center;gap:6px">space
+    <input type="range" id="xspace" min="0.4" max="3" step="0.1" value="1"></label>
+</div>
 <div id="panel"></div>
 <div id="legend"></div>
 <div id="drop">Drop to visualize</div>
@@ -69,6 +85,7 @@ const OP_COLORS = {
   Flatten: 0x6b7686, Pool: 0xc792ea, Softmax: 0xffe066,
   Gemm: 0x4da3ff, MatMul: 0x4da3ff, MaxPool: 0xc792ea, AveragePool: 0xc792ea,
   Add: 0x9aa5b5, Concat: 0x9aa5b5, Reshape: 0x6b7686, Attention: 0xff6b9d,
+  Embedding: 0x53d769, LayerNorm: 0x53d7a7, Head: 0xff6b9d,
   default: 0x9aa5b5,
 };
 const opColor = op => OP_COLORS[op] ?? OP_COLORS[Object.keys(OP_COLORS).find(k => op.includes(k))] ?? OP_COLORS.default;
@@ -108,6 +125,20 @@ const slabGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
 let dots = [], beams = [], group = null, CUR = DATA;   // rebuilt on every load
 let sel = [];                 // selection chain: neurons, beams, edges
 const collapsed = new Set();
+let lodDone = false;
+
+// layer of detail: big models start collapsed, one double-click expands a layer
+function autoCollapse(data) {
+  if (lodDone) return;
+  lodDone = true;
+  const layers = data.nodes.filter(n => n.kind === 'layer');
+  const total = layers.reduce((s, n) => s + Math.max(1, n.attrs.size || 1), 0);
+  if (total > 20000) {        // ponytail: fixed threshold; per-camera LOD in v0.8
+    for (const n of layers) collapsed.add(n.id);
+    toastMsg(`Big model: ${layers.length} layers start collapsed. ` +
+             'Double-click a layer to show its neurons.');
+  }
+}
 
 function build(data, frame = true) {
   CUR = data;
@@ -117,8 +148,21 @@ function build(data, frame = true) {
   dots = [];
   beams = [];
   const neuronPos = {};   // layer id -> neuron positions, for the weight beams
+  autoCollapse(data);
+  const headMat = new THREE.MeshStandardMaterial({ color: OP_COLORS.Head, roughness: 0.45, metalness: 0.1 });
 
   for (const node of data.nodes) {
+    if (node.kind === 'head') {          // one attention head: a small marker under its parent
+      const inst = new THREE.InstancedMesh(dotGeo, headMat, 1);
+      const m = new THREE.Matrix4().makeScale(0.7, 0.7, 0.7);
+      m.setPosition(...node.pos);
+      inst.setMatrixAt(0, m);
+      inst.userData.node = node;
+      group.add(inst);
+      dots.push(inst);
+      neuronPos[node.id] = [new THREE.Vector3(...node.pos)];
+      continue;
+    }
     if (node.kind !== 'layer') continue;
     const color = opColor(node.op);
     const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.1 });
@@ -267,7 +311,9 @@ function build(data, frame = true) {
   document.getElementById('meta').textContent =
     `${data.meta.format}${data.meta.model_type ? ' · ' + data.meta.model_type : ''} · ` +
     `${data.nodes.filter(n => n.kind === 'layer').length} layers · ` +
-    `${data.edges.length} links` + (data.meta.params ? ` · ${(data.meta.params / 1e6).toFixed(2)}M params` : '');
+    `${data.edges.length} links` + (data.meta.params
+      ? ` · ${data.meta.params >= 1e9 ? (data.meta.params / 1e9).toFixed(2) + 'B'
+                                        : (data.meta.params / 1e6).toFixed(2) + 'M'} params` : '');
 }
 
 build(DATA);
@@ -366,22 +412,73 @@ addEventListener('keydown', ev => {
     build(CUR, false);
     panel.style.display = 'none';
   }
+  // T: token flow - trace one unit index through every expanded layer
+  if ((ev.key === 't' || ev.key === 'T') && sel?.length) {
+    const last = sel[sel.length - 1];
+    if (last.type === 'neuron') {
+      sel = CUR.nodes.filter(n => (n.kind === 'layer' || n.kind === 'head')
+          && !collapsed.has(n.id) && (n.attrs.size ?? n.attrs.dim ?? 0) > last.i)
+        .map(n => ({ type: 'neuron', id: n.id, i: last.i }));
+      build(CUR, false);
+    }
+  }
 });
 // double-click a layer: collapse it to one marker, or expand it back
 addEventListener('dblclick', ev => {
   const node = pick(ev)?.object.userData.node;
   if (!node) return;
-  sel = null;
+  sel = [];
   if (collapsed.has(node.id)) collapsed.delete(node.id); else collapsed.add(node.id);
   build(CUR);
 });
 
+// --- navbar: fold/unfold layers, stretch the X axis ---
+function fillSelect() {
+  const sel = document.getElementById('lyrsel');
+  const groups = new Map();                      // block -> [label, id], in graph order
+  for (const n of CUR.nodes) {
+    if (n.kind !== 'layer') continue;
+    const b = n.attrs.block;
+    if (!groups.has(b)) groups.set(b, []);
+    groups.get(b).push([n.id.split('.').slice(-2).join('.'), n.id]);
+  }
+  sel.innerHTML = '<option value="">jump to layer…</option>' + [...groups].map(([b, items]) =>
+    `<optgroup label="${b == null ? 'input / output' : 'block ' + b}">` +
+    items.map(([l, id]) => `<option value="${id}">${l}</option>`).join('') + '</optgroup>').join('');
+  sel.value = '';
+}
+fillSelect();
+
+document.getElementById('lyrsel').onchange = ev => {
+  const id = ev.target.value;
+  if (!id) return;
+  collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id);
+  build(CUR, false);
+};
+document.getElementById('foldall').onclick = () => {
+  for (const n of CUR.nodes) if (n.kind === 'layer') collapsed.add(n.id);
+  build(CUR, false);
+};
+document.getElementById('unfoldall').onclick = () => {
+  collapsed.clear();
+  build(CUR, false);          // big models: this one can take a second
+};
+document.getElementById('xspace').onchange = ev => {
+  const k = +ev.target.value;
+  for (const n of CUR.nodes) {
+    if (n._bx === undefined) n._bx = n.pos[0];   // remember the layout X once
+    n.pos[0] = n._bx * k;
+  }
+  build(CUR, false);
+};
+
 // drag & drop -> POST /parse -> rebuild
-const drop = document.getElementById('drop'), toast = document.getElementById('toast');
-function toastMsg(msg) {
-  toast.textContent = msg;
-  toast.style.display = 'block';
-  setTimeout(() => toast.style.display = 'none', 6000);
+const drop = document.getElementById('drop');
+function toastMsg(msg) {           // resolves the element per call: build() may toast early
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 6000);
 }
 addEventListener('dragover', ev => { ev.preventDefault(); drop.style.display = 'flex'; });
 addEventListener('dragleave', ev => { if (ev.target === drop) drop.style.display = 'none'; });
@@ -398,7 +495,9 @@ addEventListener('drop', async ev => {
     const res = await fetch('/parse', { method: 'POST', body: file });
     const out = await res.json();
     if (out.error) { toastMsg(out.error); return; }
+    lodDone = false;                 // the new graph earns its own auto-collapse
     build(out.graph);
+    fillSelect();
   } catch (e) {
     toastMsg(`Upload failed: ${e.message}. To parse locally instead:  nnviz load <file>`);
   }
@@ -410,7 +509,8 @@ document.getElementById('legend').innerHTML = Object.entries(OP_COLORS).filter((
        <span style="flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#2e3d58,#62d0ff)"></span>
        <span style="color:var(--sub)">weak → strong weights</span></div>
      <div style="margin-top:6px;color:var(--sub)">Click to select. Shift+click builds a chain. Esc clears.
-       Double-click a layer to collapse it.</div>`;
+       Double-click a layer to collapse it. Click a neuron, then press T to trace
+       one unit through all layers.</div>`;
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;

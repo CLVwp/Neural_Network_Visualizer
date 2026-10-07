@@ -6,8 +6,9 @@ It builds the graph. You rotate, zoom, and inspect every neuron and connection.
 
 Supports CNNs, MLPs, Transformers, LLMs, and VLMs.
 
-**Status: working v0.4.** PyTorch and ONNX work today. Weights and activations
-are visible. The roadmap shows the full plan.
+**Status: working v0.5.** PyTorch, ONNX, and HuggingFace work today. Weights
+and activations are visible. Transformers show their blocks and attention
+heads. The roadmap shows the full plan.
 
 ## Why
 
@@ -81,7 +82,7 @@ mode.
 | ----------------------- | ---------------------------------- | ------- |
 | PyTorch                 | `.pt`, `.pth`, `state_dict`        | **done** |
 | ONNX                    | `.onnx`                            | **done** |
-| HuggingFace             | `safetensors`, `config.json`       | v0.5    |
+| HuggingFace             | `safetensors`, `config.json`       | **done** |
 | TensorFlow / Keras      | `.keras`, SavedModel               | v0.6    |
 
 Format detection reads the file signature. You never pick a parser by hand.
@@ -124,13 +125,20 @@ Format detection reads the file signature. You never pick a parser by hand.
 - [x] Input picker: random noise or an image (CNN)
 - [x] Output panel: logits, class probabilities
 
-### v0.5 — Transformers and LLMs
+### v0.5 — Transformers and LLMs ✅
 
-- [ ] HuggingFace `safetensors` + `config.json` parser
-- [ ] Transformer block layout: repeated blocks in a spatial sequence
-- [ ] Attention heads as subgraphs with `attends` relations
-- [ ] Token flow view: one token path highlighted through all blocks
-- [ ] Handle 1B+ parameter models: layer-of-detail (show layers first, neurons on demand)
+- [x] HuggingFace `safetensors` + `config.json` parser
+- [x] Transformer block layout: repeated blocks in a spatial sequence
+- [x] Attention heads as subgraphs with `attends` relations
+- [x] Path view: click a neuron, press T. One unit traced through all blocks
+- [x] Handle 1B+ parameter models: layer-of-detail. Big models open with
+      layers collapsed. Double-click a layer to show its neurons
+
+The parser reads the safetensors header only. It never loads the whole
+checkpoint, so 1B+ models open fast. Weight histograms read one tensor at a
+time, with a size cap. Without `config.json` the head count is unknown.
+Then the graph shows no heads. Use `nnviz load <model folder>` for the full
+graph.
 
 ### v0.6 — VLMs and multi-modal models
 
@@ -146,8 +154,13 @@ Format detection reads the file signature. You never pick a parser by hand.
 - [ ] Time travel: step through training checkpoints
 - [ ] Weight change diff between two checkpoints (what moved)
 
-### v0.8 — Scale
+### v0.8 — Scale and fluidity
 
+- [ ] One InstancedMesh per model. Today each layer and head is its own
+      mesh: a 27B model costs more than 2 000 draw calls
+- [ ] Raycast against a spatial index. Today every click tests every mesh
+- [ ] Smooth controls. Rebuild on a throttle, so sliders and fold actions
+      never drop frames
 - [ ] Instanced rendering for millions of edges
 - [ ] Level of detail: neurons fade out before layers do
 - [ ] Web-worker parsing for big files
@@ -190,12 +203,14 @@ pip install onnx            # only if you use ONNX files
 pip install pillow          # only for image input in live mode
 pip install -e .
 nnviz model.pth             # writes model.html. Open it in a browser.
+nnviz llama_folder/         # HuggingFace folder: config.json + safetensors
 nnviz serve                 # drag & drop server at localhost:8000
 nnviz live model.pth        # live mode: run the model, watch activations
 ```
 
 `nnviz` auto-detects the format. It accepts a pickled `nn.Module`, a
-`state_dict`, or an ONNX file. The output is one self-contained HTML file.
+`state_dict`, an ONNX file, or a HuggingFace folder. HuggingFace parsing
+needs no torch. The output is one self-contained HTML file.
 No server and no install needed to view it.
 
 ## License

@@ -1,4 +1,5 @@
 """Self-check for nnviz. Run: python test_nnviz.py"""
+import shutil
 from pathlib import Path
 
 import torch.nn as nn
@@ -467,6 +468,272 @@ def test_cli_live_loads_model_and_serves():
         server._STATE.clear()
         server._STATE.update(orig_state)
         Path("tmp_live.pth").unlink()
+
+
+# --- v0.5: transformers and LLMs ---
+
+def _write_safetensors(path, tensors: dict) -> None:
+    """Minimal safetensors writer: u64 header len + JSON header + raw data.
+    Accepts f4 (F32), f2 (F16), u2 (BF16 bits), i4 (I32) arrays."""
+    import json
+    import struct
+    import numpy as np
+    dt = {"f4": "F32", "f2": "F16", "u2": "BF16", "i4": "I32"}
+    header, blob, off = {}, b"", 0
+    for name, arr in tensors.items():
+        code = arr.dtype.str[1:]          # "<f4" -> "f4"
+        n = arr.size * arr.dtype.itemsize
+        header[name] = {"dtype": dt[code], "shape": list(arr.shape),
+                        "data_offsets": [off, off + n]}
+        blob += arr.tobytes()
+        off += n
+    hb = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(hb)) + hb + blob)
+
+
+def _tiny_hf_dir() -> Path:
+    """A tiny Llama-style HF model: 2 blocks, hidden 8, 2 heads, vocab 16."""
+    import json
+    import numpy as np
+    rng = np.random.default_rng(0).standard_normal
+    t = {"model.embed_tokens.weight": rng((16, 8)).astype("f4")}
+    for b in range(2):
+        p = f"model.layers.{b}"
+        t |= {f"{p}.input_layernorm.weight": rng(8).astype("f4"),
+              f"{p}.self_attn.q_proj.weight": rng((8, 8)).astype("f4"),
+              f"{p}.self_attn.k_proj.weight": rng((8, 8)).astype("f4"),
+              f"{p}.self_attn.v_proj.weight": rng((8, 8)).astype("f4"),
+              f"{p}.self_attn.o_proj.weight": rng((8, 8)).astype("f4"),
+              f"{p}.post_attention_layernorm.weight": rng(8).astype("f4"),
+              f"{p}.mlp.gate_proj.weight": rng((16, 8)).astype("f4"),
+              f"{p}.mlp.down_proj.weight": rng((8, 16)).astype("f4")}
+    t |= {"model.norm.weight": rng(8).astype("f4"),
+          "lm_head.weight": rng((16, 8)).astype("f4")}
+    d = Path("tmp_hf_tiny")
+    d.mkdir(exist_ok=True)
+    _write_safetensors(d / "model.safetensors", t)
+    (d / "config.json").write_text(json.dumps(
+        {"model_type": "llama", "hidden_size": 8, "num_hidden_layers": 2,
+         "num_attention_heads": 2, "intermediate_size": 16, "vocab_size": 16}))
+    return d
+
+
+def test_detect_hf_directory_and_safetensors():
+    from nnviz.detect import detect_format
+    d = _tiny_hf_dir()
+    try:
+        assert detect_format(d) == "hf"
+        assert detect_format(d / "model.safetensors") == "hf"
+    finally:
+        shutil.rmtree(d)
+
+
+def test_hf_parser_builds_blocks_in_order():
+    import shutil
+    from nnviz.parsers import parse_hf
+    d = _tiny_hf_dir()
+    try:
+        g = parse_hf(d)
+        layers = [n for n in g.nodes if n.kind == "layer"]
+        ops = [n.op for n in layers]
+        # embedding, then 2 repeated blocks, then final norm + lm head
+        assert ops[0] == "Embedding"
+        assert ops[-2:] == ["LayerNorm", "Linear"]
+        block_ops = [op for op in ops[1:-2]]
+        expect_one = ["LayerNorm", "Linear", "Linear", "Linear", "Linear",
+                      "LayerNorm", "Linear", "Linear"]
+        assert block_ops == expect_one * 2
+        # blocks carry their index for the layout
+        assert layers[1].attrs["block"] == 0
+        assert layers[len(layers) // 2].attrs["block"] == 1
+        assert g.meta["format"] == "huggingface"
+        assert g.meta["params"] == 16 * 8 + 2 * (8 + 4 * 64 + 8 + 16 * 8 + 8 * 16) + 8 + 16 * 8
+        q = next(n for n in layers if n.id.endswith("q_proj") and n.attrs["block"] == 0)
+        assert q.attrs["in_features"] == 8 and q.attrs["out_features"] == 8
+    finally:
+        shutil.rmtree(d)
+
+
+def test_hf_parser_attention_heads_and_attends():
+    import shutil
+    from nnviz.parsers import parse_hf
+    d = _tiny_hf_dir()
+    try:
+        g = parse_hf(d)
+        heads = [n for n in g.nodes if n.kind == "head"]
+        assert len(heads) == 4                     # 2 heads x 2 blocks
+        assert all(h.attrs["dim"] == 4 for h in heads)   # hidden 8 / 2 heads
+        attends = [e for e in g.edges if e.kind == "attends"]
+        assert len(attends) == 4                   # one per head, into o_proj
+        # each head receives q, k and v
+        for h in heads:
+            ins = [e.src for e in g.edges if e.dst == h.id]
+            assert len(ins) == 3
+    finally:
+        shutil.rmtree(d)
+
+
+def test_hf_parser_weight_stats_and_cap():
+    import shutil
+    import nnviz.parsers.hf as hf
+    d = _tiny_hf_dir()
+    try:
+        g = hf.parse_hf(d)
+        q = next(n for n in g.nodes if n.id.endswith("q_proj") and n.attrs["block"] == 0)
+        assert q.attrs["weights"]["count"] == 64
+        # tensors above the stats cap keep their shape but skip the histogram
+        real_cap = hf.STAT_CAP
+        hf.STAT_CAP = 100                          # bytes: everything is too big now
+        try:
+            g2 = hf.parse_hf(d)
+            q2 = next(n for n in g2.nodes if n.id.endswith("q_proj") and n.attrs["block"] == 0)
+            assert "weights" not in q2.attrs
+            assert q2.attrs["out_features"] == 8   # shape info survives
+        finally:
+            hf.STAT_CAP = real_cap
+    finally:
+        shutil.rmtree(d)
+
+
+def test_hf_layout_blocks_in_sequence():
+    import shutil
+    from nnviz.layout import layout
+    from nnviz.parsers import parse_hf
+    d = _tiny_hf_dir()
+    try:
+        g = parse_hf(d)
+        layout(g)
+        layers = [n for n in g.nodes if n.kind == "layer"]
+        xs = [n.pos[0] for n in layers]
+        assert all(b > a for a, b in zip(xs, xs[1:]))       # strict sequence
+        # the gap between blocks is wider than inside a block
+        q0 = next(n for n in layers if n.id.endswith("q_proj") and n.attrs["block"] == 0)
+        norm0 = next(n for n in layers if n.id.endswith("input_layernorm") and n.attrs["block"] == 0)
+        o0 = next(n for n in layers if n.id.endswith("o_proj") and n.attrs["block"] == 0)
+        q1 = next(n for n in layers if n.id.endswith("q_proj") and n.attrs["block"] == 1)
+        within = o0.pos[0] - norm0.pos[0] if o0.pos[0] > norm0.pos[0] else q0.pos[0] - norm0.pos[0]
+        between = q1.pos[0] - o0.pos[0]
+        assert between > within
+        # heads sit below their parent layer, spread apart
+        heads = [n for n in g.nodes if n.kind == "head" and n.attrs.get("block") == 0]
+        assert all(h.pos[1] < 0 for h in heads)
+        assert heads[0].pos[2] != heads[1].pos[2]
+    finally:
+        shutil.rmtree(d)
+
+
+def test_classify_detects_transformer_from_heads():
+    from nnviz.detect import classify
+    from nnviz.ir import Graph, Node
+    g = Graph()
+    g.nodes = [Node("0", "layer", "LayerNorm"), Node("1", "layer", "Linear"),
+               Node("1.h0", "head", "Head")]
+    assert classify(g) == "Transformer"
+
+
+def test_cli_load_hf_dir_writes_html():
+    import nnviz.cli as cli
+    d = _tiny_hf_dir()
+    try:
+        cli.main(["load", str(d), "-o", "tmp_hf_out.html"])
+        html = Path("tmp_hf_out.html").read_text(encoding="utf-8")
+        assert "__MODEL_DATA__" not in html
+        assert "self_attn" in html                      # graph embedded
+    finally:
+        shutil.rmtree(d)
+        Path("tmp_hf_out.html").unlink(missing_ok=True)
+
+
+def test_hf_parser_reads_packed_int4_and_text_config():
+    """INT4 checkpoints: weights come as weight_packed (+scale/shape),
+    the head count hides in config.text_config, vision tensors wait for v0.6."""
+    import json
+    import numpy as np
+    from nnviz.parsers import parse_hf
+    d = Path("tmp_hf_packed")
+    d.mkdir(exist_ok=True)
+    i32 = lambda a: np.asarray(a, dtype="<i4")
+    u2 = lambda a: np.asarray(a, dtype="<u2")          # BF16 bits
+    t = {"model.language_model.embed_tokens.weight": u2(np.zeros((16, 8), np.uint32) >> 16),
+         "model.language_model.layers.0.input_layernorm.weight": u2(np.full(8, 0x3F80)),
+         "model.language_model.layers.0.self_attn.q_proj.weight_packed": i32(np.zeros((8, 1))),
+         "model.language_model.layers.0.self_attn.q_proj.weight_scale": u2(np.zeros((8, 1))),
+         "model.language_model.layers.0.self_attn.o_proj.weight_packed": i32(np.zeros((8, 1))),
+         "model.visual.blocks.0.attn.qkv.weight_packed": i32(np.zeros((8, 1))),
+         "lm_head.weight": u2(np.zeros((16, 8), np.uint32) >> 16)}
+    _write_safetensors(d / "model.safetensors", t)
+    (d / "config.json").write_text(json.dumps(
+        {"model_type": "qwen3_5", "text_config": {"num_attention_heads": 2}}))
+    try:
+        g = parse_hf(d)
+        ids = [n.id for n in g.nodes]
+        # packed weight becomes the node; scale/shape and visual stay out
+        assert "model.language_model.layers.0.self_attn.q_proj" in ids
+        assert "model.visual.blocks.0.attn.qkv" not in ids
+        assert not any("weight_scale" in i for i in ids)
+        q = next(n for n in g.nodes if n.id.endswith("q_proj"))
+        assert q.attrs["in_features"] == 8 and q.attrs["out_features"] == 8   # 1 x 8-per-int32
+        assert "weights" not in q.attrs            # packed ints: no honest histogram
+        # heads from text_config
+        assert len([n for n in g.nodes if n.kind == "head"]) == 2
+        assert g.meta["params"] == 16 * 8 + 8 + 8 * 8 + 8 * 8 + 16 * 8    # packed counts x8
+    finally:
+        shutil.rmtree(d)
+
+
+def test_hf_parser_bfloat16_stats():
+    import numpy as np
+    import nnviz.parsers.hf as hf
+    from nnviz.parsers import parse_hf
+    d = Path("tmp_hf_bf16")
+    d.mkdir(exist_ok=True)
+    rng = np.random.default_rng(1).standard_normal
+    w = rng((4, 4)).astype("f4")
+    bits = (w.view("<u4") >> 16).astype("<u2")     # f32 -> bf16 bits
+    t = {"model.layers.0.mlp.gate_proj.weight": bits}
+    _write_safetensors(d / "model.safetensors", t)
+    try:
+        g = parse_hf(d)
+        gate = next(n for n in g.nodes if n.op == "Linear")
+        ws = gate.attrs["weights"]
+        assert ws["count"] == 16
+        assert abs(ws["mean"] - float(w.mean())) < 0.02    # bf16 keeps ~3 digits
+    finally:
+        shutil.rmtree(d)
+
+
+def test_server_parses_safetensors_upload():
+    import json
+    import threading
+    import socket
+    import shutil
+    from urllib.request import urlopen, Request
+    import numpy as np
+    import nnviz.server as srv
+
+    d = _tiny_hf_dir()
+    blob = (d / "model.safetensors").read_bytes()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    real_open = srv.webbrowser.open
+    srv.webbrowser.open = lambda *a, **k: None
+    httpd = srv.ThreadingHTTPServer(("127.0.0.1", port), srv.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        resp = urlopen(Request(f"http://127.0.0.1:{port}/parse", data=blob,
+                               headers={"Content-Type": "application/octet-stream"}), timeout=10)
+        g = json.loads(resp.read())["graph"]
+        assert any(n["op"] == "Embedding" for n in g["nodes"])
+        # no config.json in a bare upload: the head count is unknown, so
+        # no head nodes. Use nnviz load <dir> for the full graph.
+        assert not any(n["kind"] == "head" for n in g["nodes"])
+        assert any("q_proj" in n["id"] for n in g["nodes"])
+    finally:
+        srv._STATE["model"] = None
+        srv._STATE["graph"] = None
+        httpd.shutdown()
+        shutil.rmtree(d)
 
 
 if __name__ == "__main__":

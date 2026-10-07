@@ -29,11 +29,16 @@ def _parse_any(path: Path):
     """Auto-detect the format, parse with the matching parser."""
     import torch
     from .detect import detect_format
-    from .parsers import parse_module, parse_onnx, parse_state_dict
+    from .parsers import parse_hf, parse_module, parse_onnx, parse_state_dict
 
     fmt = detect_format(path)
     if fmt == "onnx":
         return parse_onnx(str(path))
+    if fmt == "hf":
+        try:
+            return parse_hf(path)
+        except ValueError as e:
+            sys.exit(str(e))
     if fmt == "torch":
         obj = _torch_load(path)
         if isinstance(obj, torch.nn.Module):
@@ -44,7 +49,7 @@ def _parse_any(path: Path):
             return g
         sys.exit(f"Unsupported torch content in {path}: {type(obj).__name__}")
     sys.exit(f"Unknown or unsupported format: {path}\n"
-             "Supported: PyTorch (.pth, .pt), ONNX (.onnx).")
+             "Supported: PyTorch (.pth, .pt), ONNX (.onnx), HuggingFace (safetensors).")
 
 
 def _cmd_load(args) -> None:
@@ -54,7 +59,7 @@ def _cmd_load(args) -> None:
 
     path = Path(args.model)
     g = _parse_any(path)
-    g.meta["model_type"] = classify(g)
+    g.meta.setdefault("model_type", classify(g))
     layout(g)
 
     out = Path(args.out) if args.out else path.with_suffix(".html")
@@ -84,7 +89,7 @@ def _cmd_live(args) -> None:
     if not isinstance(obj, torch.nn.Module):
         sys.exit(f"Live mode needs a full nn.Module (a {type(obj).__name__} cannot run).")
     g = parse_module(obj)
-    g.meta["model_type"] = classify(g)
+    g.meta["model_type"] = g.meta.get("model_type") or classify(g)
     layout(g)
     server.live_load(g, obj)
     print(f"Live model: {path}  ({g.meta['model_type']} · {len(g.nodes)} layers · "
@@ -100,7 +105,7 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="nnviz", description="Visualize a neural network in 3D.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_load = sub.add_parser("load", help="convert a model file to a 3D HTML viewer")
-    p_load.add_argument("model", help="model file: .pth / .pt / .onnx")
+    p_load.add_argument("model", help="model file or folder: .pth / .pt / .onnx / safetensors / HF dir")
     p_load.add_argument("-o", "--out", help="output HTML (default: <model>.html)")
     p_load.add_argument("--json", help="also dump the raw IR graph as JSON")
     p_serve = sub.add_parser("serve", help="drag & drop server: parse files in the browser")
