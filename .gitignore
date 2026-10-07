@@ -17,3 +17,6 @@ node_modules/
 # local artifacts
 demo_*
 .playwright-mcp/
+
+# generated outputs
+/*.html
