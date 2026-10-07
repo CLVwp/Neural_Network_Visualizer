@@ -4,22 +4,29 @@
 <meta charset="utf-8">
 <title>Neural Network Visualizer</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; font-family: system-ui, sans-serif; }
+  :root { --bg: #0b0e14; --panel: rgba(15, 20, 32, 0.92); --text: #dbe4f0;
+          --sub: #8892a8; --border: #2a3448; --accent: #7fb4ff; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); font-family: system-ui, sans-serif; }
   #panel { position: fixed; top: 12px; right: 12px; width: 280px; max-height: 80vh; overflow-y: auto;
-           background: rgba(15, 20, 32, 0.92); color: #dbe4f0; border: 1px solid #2a3448; border-radius: 8px;
+           background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
            padding: 14px 16px; font-size: 13px; display: none; }
-  #panel h2 { margin: 0 0 8px; font-size: 15px; color: #7fb4ff; }
+  #panel h2 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
   #panel table { width: 100%; border-collapse: collapse; }
   #panel td { padding: 2px 0; vertical-align: top; }
-  #panel td:first-child { color: #8892a8; padding-right: 8px; white-space: nowrap; }
-  #legend { position: fixed; bottom: 12px; left: 12px; background: rgba(15, 20, 32, 0.92); color: #dbe4f0;
-            border: 1px solid #2a3448; border-radius: 8px; padding: 10px 14px; font-size: 12px; }
+  #panel td:first-child { color: var(--sub); padding-right: 8px; white-space: nowrap; }
+  #hist { display: flex; align-items: flex-end; gap: 1px; height: 60px; margin: 10px 0 8px; }
+  #hist div { flex: 1; background: var(--accent); min-height: 1px; }
+  #legend { position: fixed; bottom: 12px; left: 12px; background: var(--panel); color: var(--text);
+            border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 12px; }
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
-  #meta { position: fixed; top: 12px; left: 12px; color: #8892a8; font-size: 12px;
-          background: rgba(15, 20, 32, 0.92); border: 1px solid #2a3448; border-radius: 8px; padding: 8px 12px; }
+  #meta { position: fixed; top: 12px; left: 12px; color: var(--sub); font-size: 12px;
+          background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+  #theme { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); cursor: pointer;
+           background: var(--panel); color: var(--text); border: 1px solid var(--border);
+           border-radius: 8px; padding: 6px 12px; font-size: 12px; }
   #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
-          background: rgba(11, 14, 20, 0.85); color: #7fb4ff; font-size: 22px; z-index: 10;
-          border: 3px dashed #7fb4ff; border-radius: 12px; margin: 10px; }
+          background: rgba(11, 14, 20, 0.85); color: var(--accent); font-size: 22px; z-index: 10;
+          border: 3px dashed var(--accent); border-radius: 12px; margin: 10px; }
   #toast { position: fixed; bottom: 12px; right: 12px; max-width: 420px; background: #3a1f24; color: #ff9d9d;
            border: 1px solid #803a3a; border-radius: 8px; padding: 10px 14px; font-size: 12px;
            display: none; white-space: pre-wrap; z-index: 11; }
@@ -27,6 +34,7 @@
 </head>
 <body>
 <div id="meta"></div>
+<div id="theme"></div>
 <div id="panel"></div>
 <div id="legend"></div>
 <div id="drop">Drop to visualize</div>
@@ -63,53 +71,183 @@ const key = new THREE.DirectionalLight(0xffffff, 1.6);
 key.position.set(1, 2, 3);
 scene.add(key);
 
-const NODE_R = 0.45, GAP = 1.35;
-const dotGeo = new THREE.SphereGeometry(NODE_R, 12, 10);
-let dots = [], group = null;   // rebuilt on every load
+const THEMES = {
+  dark:  { bg: '#0b0e14', panel: 'rgba(15, 20, 32, 0.92)', text: '#dbe4f0', sub: '#8892a8', border: '#2a3448', accent: '#7fb4ff' },
+  light: { bg: '#e8ecf4', panel: 'rgba(255, 255, 255, 0.94)', text: '#232a38', sub: '#5b6472', border: '#c5cedd', accent: '#2b6cb0' },
+};
+let themeName = localStorage.getItem('nnviz-theme') || 'dark';
+function applyTheme(name) {
+  themeName = name;
+  localStorage.setItem('nnviz-theme', name);
+  const t = THEMES[name];
+  for (const [k, v] of Object.entries(t)) document.documentElement.style.setProperty(`--${k}`, v);
+  scene.background = new THREE.Color(t.bg);
+  document.getElementById('theme').textContent = name === 'dark' ? '☀ light' : '☾ dark';
+}
+document.getElementById('theme').onclick = () => applyTheme(themeName === 'dark' ? 'light' : 'dark');
+applyTheme(themeName);
 
-function build(data) {
+const NODE_R = 0.45, GAP = 2.4;
+const dotGeo = new THREE.SphereGeometry(NODE_R, 12, 10);
+const slabGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+let dots = [], beams = [], group = null, CUR = DATA;   // rebuilt on every load
+let sel = [];                 // selection chain: neurons, beams, edges
+const collapsed = new Set();
+
+function build(data, frame = true) {
+  CUR = data;
   if (group) scene.remove(group);
   group = new THREE.Group();
   scene.add(group);
   dots = [];
+  beams = [];
+  const neuronPos = {};   // layer id -> neuron positions, for the weight beams
 
   for (const node of data.nodes) {
     if (node.kind !== 'layer') continue;
     const color = opColor(node.op);
     const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.1 });
-    const size = Math.max(1, node.attrs.size || 1);
-    const inst = new THREE.InstancedMesh(dotGeo, mat, size);
+    if (collapsed.has(node.id)) {
+      // collapsed: one big marker keeps the layer on the map
+      const inst = new THREE.InstancedMesh(dotGeo, mat, 1);
+      const m = new THREE.Matrix4().makeScale(3, 3, 3);
+      m.setPosition(...node.pos);
+      inst.setMatrixAt(0, m);
+      inst.userData.node = node;
+      group.add(inst);
+      dots.push(inst);
+      neuronPos[node.id] = [new THREE.Vector3(...node.pos)];
+      continue;
+    }
+    // conv layers draw as grids of feature-map slabs; dense layers as dot walls
+    const isConv = node.attrs.out_channels != null && node.attrs.out_features == null;
+    const size = isConv ? Math.max(1, node.attrs.out_channels) : Math.max(1, node.attrs.size || 1);
+    const inst = new THREE.InstancedMesh(isConv ? slabGeo : dotGeo, mat, size);
     const m = new THREE.Matrix4();
     const cols = Math.ceil(Math.sqrt(size));
+    const gap = isConv ? 3.2 : GAP;
+    const positions = [];
     for (let i = 0; i < size; i++) {
       const r = Math.floor(i / cols), c = i % cols;
       // columns along X, neuron grid in the YZ plane
-      m.setPosition(node.pos[0], (r - (Math.ceil(size / cols) - 1) / 2) * GAP, (c - (cols - 1) / 2) * GAP);
+      const y = (r - (Math.ceil(size / cols) - 1) / 2) * gap, z = (c - (cols - 1) / 2) * gap;
+      m.setPosition(node.pos[0], y, z);
       inst.setMatrixAt(i, m);
+      positions.push(new THREE.Vector3(node.pos[0], y, z));
+    }
+    neuronPos[node.id] = positions;
+    // per-neuron precision: strong incoming weights glow brighter
+    const rs = node.attrs.weights?.row_strengths;
+    if (rs && rs.length === size) {
+      const base = new THREE.Color(color);
+      const rmax = Math.max(...rs, 1e-9);
+      const dim = base.clone().multiplyScalar(0.25);
+      const hot = base.clone().lerp(new THREE.Color(0xffffff), 0.55);
+      const c = new THREE.Color();
+      for (let i = 0; i < size; i++) inst.setColorAt(i, c.lerpColors(dim, hot, rs[i] / rmax));
+      inst.instanceColor.needsUpdate = true;
     }
     inst.userData.node = node;
     group.add(inst);
     dots.push(inst);
   }
 
-  // one line between connected layers (layer-level links)
-  const pts = [];
+  // links between layers: one beam per neuron when the dst layer is expanded
   const byId = Object.fromEntries(data.nodes.map(n => [n.id, n]));
+  const pts = [];
+  const smax = Math.max(0, ...data.edges.map(e => e.attrs?.strength ?? 0), 1e-9);
+  const weak = new THREE.Color(0x2e3d58), strong = new THREE.Color(0x62d0ff);
+  const linkGeo = new THREE.CylinderGeometry(1, 1, 1, 6);   // unit cylinder, scaled per beam
+  const up = new THREE.Vector3(0, 1, 0), dir = new THREE.Vector3();
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), col = new THREE.Color();
   for (const e of data.edges) {
     const a = byId[e.src], b = byId[e.dst];
     if (!a || !b) continue;
-    pts.push(new THREE.Vector3(...a.pos), new THREE.Vector3(...b.pos));
-  }
-  if (pts.length) {
-    group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),
-              new THREE.LineBasicMaterial({ color: 0x3a4a66, transparent: true, opacity: 0.7 })));
+    const va = new THREE.Vector3(...a.pos), vb = new THREE.Vector3(...b.pos);
+    pts.push(va, vb);
+    const rs = b.attrs.weights?.row_strengths;
+    const bsize = neuronPos[b.id]?.length ?? 0;
+    const spos = neuronPos[a.id] ?? [va];
+    if (!collapsed.has(a.id) && !collapsed.has(b.id) && bsize > 1) {
+      // real wiring: pass-through ops map neuron i to neuron i; weighted layers
+      // read every input, drawn as a sampled grid, capped at 3000 beams.
+      // Flatten reorders 1:1, so the index pairing stays count-true.
+      const pairs = [];   // [from, to, strength 0..1, srcIdx, dstIdx]
+      if (!rs) {
+        for (let j = 0; j < bsize; j += Math.ceil(bsize / 3000))
+          pairs.push([spos[Math.min(j, spos.length - 1)], neuronPos[b.id][j],
+                      (e.attrs?.strength ?? 0) / smax, j, j]);
+      } else {
+        const fmax = Math.max(...rs, 1e-9);
+        const stepS = Math.max(1, Math.ceil(spos.length / 40));
+        const stepB = Math.max(1, Math.ceil(bsize / 75));
+        for (let j = 0; j < bsize; j += stepB)
+          for (let i = 0; i < spos.length; i += stepS)
+            pairs.push([spos[i], neuronPos[b.id][j], Math.min(1, rs[j] / fmax), i, j]);
+      }
+      const inst = new THREE.InstancedMesh(linkGeo,
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.85 }), pairs.length);
+      pairs.forEach(([p0, p1, t, si, di], k) => {
+        // selection: beams touching the chain glow, the rest fade out
+        let mode = 0;
+        if (sel.length)
+          mode = sel.some(s => s.type === 'neuron'
+              ? ((e.src === s.id && si === s.i) || (e.dst === s.id && di === s.i))
+              : s.type === 'beam' && s.edge === e && s.k === k) ? 1 : 2;
+        dir.subVectors(p1, p0);
+        const len = Math.max(dir.length(), 0.001);
+        q.setFromUnitVectors(up, dir.clone().normalize());
+        const rad = (0.015 + 0.14 * Math.pow(t, 0.6)) * (mode === 1 ? 2.2 : 1);
+        m4.compose(new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5),
+                   q, sc.set(rad, len, rad));
+        inst.setMatrixAt(k, m4);
+        if (mode === 1) col.set(0xffd54f);
+        else { col.lerpColors(weak, strong, t); if (mode === 2) col.multiplyScalar(0.12); }
+        inst.setColorAt(k, col);
+      });
+      inst.userData.fan = { edge: e, pairs };
+      inst.instanceColor.needsUpdate = true;
+      group.add(inst);
+      beams.push(inst);
+      continue;
+    }
+    const t = Math.min(1, (e.attrs?.strength ?? 0) / smax);
+    let mode = 0;
+    if (sel.length) mode = sel.some(s => s.type === 'edge' && s.edge === e) ? 1 : 2;
+    const rad = (0.06 + 0.55 * Math.pow(t, 0.6)) * (mode === 1 ? 1.6 : 1);
+    const mat = new THREE.MeshBasicMaterial({
+      color: mode === 1 ? 0xffd54f
+           : mode === 2 ? weak.clone().multiplyScalar(0.12)
+           : weak.clone().lerp(strong, t),
+      transparent: true, opacity: mode === 1 ? 0.95 : 0.35 + 0.6 * t });
+    const link = new THREE.Mesh(linkGeo, mat);
+    link.userData.edge = e;
+    dir.subVectors(vb, va);
+    link.scale.set(rad, dir.length(), rad);
+    link.position.copy(va).add(vb).multiplyScalar(0.5);
+    link.quaternion.setFromUnitVectors(up, dir.normalize());
+    group.add(link);
+    beams.push(link);
   }
 
-  // frame the whole graph
-  const box = new THREE.Box3().setFromPoints(pts.length ? pts : [new THREE.Vector3()]);
-  const center = box.getCenter(new THREE.Vector3()), r = Math.max(box.getSize(new THREE.Vector3()).length(), 10);
-  camera.position.set(center.x + r * 0.5, r * 0.45, r * 0.9);
-  controls.target.copy(center);
+  // frame the whole graph (selection rebuilds keep the camera where it is)
+  if (frame) {
+    const box = new THREE.Box3().setFromPoints(pts.length ? pts : [new THREE.Vector3()]);
+    const center = box.getCenter(new THREE.Vector3()), r = Math.max(box.getSize(new THREE.Vector3()).length(), 10);
+    camera.position.set(center.x + r * 0.5, r * 0.45, r * 0.9);
+    controls.target.copy(center);
+  }
+
+  // highlight the selection chain with halo markers
+  for (const s of sel) {
+    if (s.type === 'neuron') {
+      const p = neuronPos[s.id]?.[s.i];
+      if (p) marker(p, 0xffd54f, 1.8);
+    } else if (s.type === 'beam') {
+      marker(s.pa, 0xffd54f, 1.6);
+      marker(s.pb, 0xffd54f, 1.6);
+    }
+  }
 
   document.getElementById('meta').textContent =
     `${data.meta.format}${data.meta.model_type ? ' · ' + data.meta.model_type : ''} · ` +
@@ -121,15 +259,106 @@ build(DATA);
 
 const panel = document.getElementById('panel');
 const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
-addEventListener('pointerdown', ev => {
+function pick(ev) {
   mouse.set(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(mouse, camera);
-  const hit = raycaster.intersectObjects(dots)[0];
-  const node = hit?.object.userData.node;
-  if (!node) { panel.style.display = 'none'; return; }
-  panel.innerHTML = `<h2>${node.op}</h2><table>${Object.entries(node.attrs).map(
-    ([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>`;
+  // neurons win over beams where they overlap
+  return raycaster.intersectObjects(dots)[0]
+      ?? raycaster.intersectObjects(beams)[0] ?? null;
+}
+function marker(p, color, scale) {
+  const mk = new THREE.Mesh(new THREE.SphereGeometry(NODE_R * scale, 16, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55 }));
+  mk.position.copy(p);
+  group.add(mk);
+}
+function connPanel(e, p) {
+  const byId = Object.fromEntries(CUR.nodes.map(n => [n.id, n]));
+  const a = byId[e.src], b = byId[e.dst];
+  const rs = b.attrs.weights?.row_strengths;
+  const ends = p
+    ? `<tr><td>from</td><td>${a.op} [${p[3]}]</td></tr>
+       <tr><td>to</td><td>${b.op} [${p[4]}]</td></tr>`
+       + (rs ? `<tr><td>|w|</td><td>${rs[p[4]]}</td></tr>` : '')
+    : `<tr><td>from</td><td>${a.op} (collapsed)</td></tr>
+       <tr><td>to</td><td>${b.op}</td></tr>`;
+  return `<h2>Connection</h2><table>${ends}
+    <tr><td>link |w|</td><td>${(e.attrs?.strength ?? 0).toFixed(5)}</td></tr>
+  </table><div style="color:var(--sub);margin-top:6px">Click empty space to clear.</div>`;
+}
+function neuronHtml(node, i) {
+  const rs = node.attrs.weights?.row_strengths;
+  if (i == null || !rs || collapsed.has(node.id)) return '';
+  const rank = rs.filter(v => v > rs[i]).length + 1;
+  return `<table style="margin-top:8px">
+    <tr><td>neuron ${i}</td><td>|w| ${rs[i]}</td></tr>
+    <tr><td>rank</td><td>${rank} / ${rs.length} by incoming |w|</td></tr>
+  </table>`;
+}
+function histHtml(w) {
+  if (!w) return '';
+  const top = Math.max(...w.hist, 1);
+  const bars = w.hist.map(v => `<div style="height:${Math.max(2, v / top * 100)}%"></div>`).join('');
+  return `<div id="hist">${bars}</div><table>
+    <tr><td>count</td><td>${w.count}</td></tr>
+    <tr><td>mean</td><td>${w.mean.toFixed(4)}</td></tr>
+    <tr><td>std</td><td>${w.std.toFixed(4)}</td></tr>
+    <tr><td>min / max</td><td>${w.min.toFixed(3)} / ${w.max.toFixed(3)}</td></tr>
+  </table><div style="color:var(--sub);margin-top:6px">weight distribution</div>`;
+}
+let downX = 0, downY = 0;
+const sameItem = (a, b) => a.type === b.type
+  && (a.type === 'neuron' ? a.id === b.id && a.i === b.i
+    : a.type === 'beam' ? a.edge === b.edge && a.k === b.k
+    : a.edge === b.edge);
+addEventListener('pointerdown', ev => { downX = ev.clientX; downY = ev.clientY; });
+addEventListener('pointerup', ev => {
+  // a drag moves the camera and must not change the selection
+  if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 5) return;
+  const hit = pick(ev);
+  if (!hit) return;                     // background click keeps the selection
+  const { object, instanceId } = hit;
+  let item = null, conn = null;
+  if (object.userData.fan) {
+    const fan = object.userData.fan, p = fan.pairs[instanceId];
+    item = { type: 'beam', edge: fan.edge, k: instanceId, pa: p[0].clone(), pb: p[1].clone() };
+    conn = connPanel(fan.edge, p);
+  } else if (!object.userData.node && object.userData.edge) {   // collapsed tube
+    item = { type: 'edge', edge: object.userData.edge };
+    conn = connPanel(object.userData.edge, null);
+  }
+  const node = object.userData.node;
+  if (!item && node && instanceId != null && !collapsed.has(node.id))
+    item = { type: 'neuron', id: node.id, i: instanceId };
+  if (item) {
+    if (ev.shiftKey) {
+      if (!sel.some(s => sameItem(s, item))) sel.push(item);
+    } else sel = [item];
+    build(CUR, false);
+  }
+  if (node) {
+    const rows = Object.entries(node.attrs).filter(([k]) => k !== 'weights').map(
+      ([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    panel.innerHTML = `<h2>${node.op}</h2><table>${rows}</table>`
+      + histHtml(node.attrs.weights) + neuronHtml(node, instanceId);
+  } else panel.innerHTML = conn;
   panel.style.display = 'block';
+});
+// Escape clears the selection chain
+addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && sel.length) {
+    sel = [];
+    build(CUR, false);
+    panel.style.display = 'none';
+  }
+});
+// double-click a layer: collapse it to one marker, or expand it back
+addEventListener('dblclick', ev => {
+  const node = pick(ev)?.object.userData.node;
+  if (!node) return;
+  sel = null;
+  if (collapsed.has(node.id)) collapsed.delete(node.id); else collapsed.add(node.id);
+  build(CUR);
 });
 
 // drag & drop -> POST /parse -> rebuild
@@ -161,7 +390,12 @@ addEventListener('drop', async ev => {
 });
 
 document.getElementById('legend').innerHTML = Object.entries(OP_COLORS).filter(([k]) => k !== 'default')
-  .map(([k, c]) => `<span class="swatch" style="background:#${c.toString(16).padStart(6, '0')}"></span>${k}</span>`).join('<br>');
+  .map(([k, c]) => `<span class="swatch" style="background:#${c.toString(16).padStart(6, '0')}"></span>${k}</span>`).join('<br>')
+  + `<div style="margin-top:8px;display:flex;align-items:center;gap:6px">
+       <span style="flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#2e3d58,#62d0ff)"></span>
+       <span style="color:var(--sub)">weak → strong weights</span></div>
+     <div style="margin-top:6px;color:var(--sub)">Click to select. Shift+click builds a chain. Esc clears.
+       Double-click a layer to collapse it.</div>`;
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;

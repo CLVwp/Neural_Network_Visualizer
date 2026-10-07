@@ -7,6 +7,7 @@ import onnx
 from onnx import numpy_helper
 
 from ..ir import Edge, Graph, Node
+from ..stats import apply_strengths, weight_stats
 
 _DENSE = ("Gemm", "MatMul")
 
@@ -38,6 +39,8 @@ def parse_onnx(model) -> Graph:
         nid = f"{n.op_type}_{i}"
         a: dict = {}
         w = next((weights[name] for name in n.input if name in weights), None)
+        if w is not None:
+            a["weights"] = weight_stats(w)
         if n.op_type == "Conv" and w is not None:
             a |= {"out_channels": int(w.shape[0]), "in_channels": int(w.shape[1]),
                   "kernel": list(w.shape[2:]), "size": int(w.shape[0])}
@@ -58,4 +61,5 @@ def parse_onnx(model) -> Graph:
                 g.edges.append(Edge(ids[prod[t].output[0]], nid))
             elif t in graph_inputs:             # fed by the graph input
                 g.edges.append(Edge("in_0", nid))
+    apply_strengths(g)
     return g

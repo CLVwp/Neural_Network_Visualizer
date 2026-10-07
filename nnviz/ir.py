@@ -21,9 +21,10 @@ class Edge:
     src: str
     dst: str
     kind: str = "connects"
+    attrs: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {"src": self.src, "dst": self.dst, "kind": self.kind}
+        return {"src": self.src, "dst": self.dst, "kind": self.kind, "attrs": self.attrs}
 
 
 @dataclass

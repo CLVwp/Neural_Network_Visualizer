@@ -158,6 +158,172 @@ def test_onnx_parser_follows_real_dag_edges():
     assert g.meta["format"] == "onnx"
 
 
+# --- v0.3: make weights visible ---
+
+def test_module_nodes_carry_weight_stats():
+    import torch
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+    g = parse_module(model)
+
+    lin = next(n for n in g.nodes if n.op == "Linear" and n.attrs.get("in_features") == 4)
+    ws = lin.attrs["weights"]
+    assert ws["count"] == 32
+    assert ws["min"] <= ws["mean"] <= ws["max"]
+    assert len(ws["hist"]) == 40
+    assert sum(ws["hist"]) == 32
+    assert ws["hist_lo"] <= ws["min"] and ws["max"] <= ws["hist_hi"]
+    # ReLU has no parameters, so it carries no weight stats
+    relu = next(n for n in g.nodes if n.op == "ReLU")
+    assert "weights" not in relu.attrs
+
+
+def test_edge_strength_mapped_from_weights():
+    import torch
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+    g = parse_module(model)
+    l1 = next(n for n in g.nodes if n.op == "Linear" and n.attrs.get("in_features") == 4)
+    l2 = next(n for n in g.nodes if n.op == "Linear" and n.attrs.get("in_features") == 8)
+
+    e_in = next(e for e in g.edges if e.dst == l1.id)
+    assert abs(e_in.attrs["strength"] - l1.attrs["weights"]["mean_abs"]) < 1e-6
+    # the link into a weightless pass-through op inherits the upstream strength
+    e_relu = next(e for e in g.edges if e.dst != l1.id and e.dst != l2.id)
+    assert abs(e_relu.attrs["strength"] - l1.attrs["weights"]["mean_abs"]) < 1e-6
+    e_out = next(e for e in g.edges if e.dst == l2.id)
+    assert abs(e_out.attrs["strength"] - l2.attrs["weights"]["mean_abs"]) < 1e-6
+
+
+def test_state_dict_carries_weight_stats():
+    import torch
+    from nnviz.parsers import parse_state_dict
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(784, 128), nn.ReLU(), nn.Linear(128, 10))
+    g = parse_state_dict(model.state_dict())
+    lin = next(n for n in g.nodes if n.op == "Linear" and n.attrs.get("in_features") == 784)
+    ws = lin.attrs["weights"]
+    assert ws["count"] == 784 * 128
+    assert len(ws["hist"]) == 40
+
+
+def test_onnx_carries_weight_stats():
+    import numpy as np
+    import onnx
+    from onnx import helper, TensorProto
+    rng = np.random.default_rng(0)
+    w = helper.make_tensor("w", TensorProto.FLOAT, [4, 50], rng.standard_normal(200, dtype=np.float32))
+    nodes = [helper.make_node("Gemm", ["x", "w"], ["y"])]
+    graph = helper.make_graph(
+        nodes, "net",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 50])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4])], [w])
+    g = parse_onnx(helper.make_model(graph))
+
+    gemm = next(n for n in g.nodes if n.op == "Gemm")
+    ws = gemm.attrs["weights"]
+    assert ws["count"] == 200
+    assert ws["min"] < 0 < ws["max"]
+    assert abs(g.edges[0].attrs["strength"] - ws["mean_abs"]) < 1e-6
+
+
+def test_serve_honors_port_flag():
+    import nnviz.cli as cli
+    import nnviz.server as server
+    calls = {}
+    orig = server.serve
+    server.serve = lambda port=8000: calls.setdefault("port", port)
+    try:
+        cli.main(["serve", "--port", "9001"])
+    finally:
+        server.serve = orig
+    assert calls.get("port") == 9001
+
+
+def test_server_serves_generated_files():
+    import threading
+    from urllib.request import urlopen
+    from http.server import HTTPServer
+    from nnviz.server import Handler
+
+    Path("tmp_served.html").write_text("<h1>generated</h1>", encoding="utf-8")
+    httpd = HTTPServer(("127.0.0.1", 0), Handler)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        port = httpd.server_address[1]
+        # the viewer lives at /
+        assert "Neural Network Visualizer" in urlopen(f"http://127.0.0.1:{port}/").read().decode()
+        # generated files are served from the launch directory
+        assert "generated" in urlopen(f"http://127.0.0.1:{port}/tmp_served.html").read().decode()
+    finally:
+        httpd.shutdown()
+        Path("tmp_served.html").unlink()
+
+
+def test_weight_stats_include_per_neuron_strengths():
+    import torch
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Conv2d(3, 6, 3))
+    g = parse_module(model)
+    lin = next(n for n in g.nodes if n.op == "Linear")
+    rs = lin.attrs["weights"]["row_strengths"]
+    assert len(rs) == 8                       # one strength per output neuron
+    import numpy as np
+    w = model[0].weight.detach().numpy()
+    assert abs(rs[3] - float(np.abs(w[3]).mean())) < 1e-4
+    conv = next(n for n in g.nodes if n.op == "Conv2d")
+    assert len(conv.attrs["weights"]["row_strengths"]) == 6   # one per filter
+
+
+def test_server_keeps_serving_during_slow_parse():
+    import threading
+    import time
+    from urllib.request import urlopen
+    import nnviz.server as srv
+
+    class Slow(srv.Handler):
+        def do_POST(self):
+            time.sleep(3)
+
+    # pick a free port
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    real_open, real_handler = srv.webbrowser.open, srv.Handler
+    srv.webbrowser.open = lambda *a, **k: None
+    srv.Handler = Slow
+    try:
+        threading.Thread(target=srv.serve, args=(port,), daemon=True).start()
+        time.sleep(0.7)
+        threading.Thread(
+            target=lambda: urlopen(f"http://127.0.0.1:{port}/parse", data=b"x", timeout=10).read(),
+            daemon=True).start()
+        time.sleep(0.3)                     # the slow parse now holds the server
+        html = urlopen(f"http://127.0.0.1:{port}/", timeout=2).read().decode()
+        assert "Neural Network Visualizer" in html
+    finally:
+        srv.webbrowser.open, srv.Handler = real_open, real_handler
+
+
+def test_serve_ctrl_c_stops_quietly():
+    import nnviz.server as srv
+
+    class FakeServer:
+        def __init__(self, addr, handler):
+            pass
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+    orig = srv.ThreadingHTTPServer
+    srv.ThreadingHTTPServer = FakeServer
+    try:
+        srv.serve(0)          # must swallow Ctrl+C, no traceback
+    finally:
+        srv.ThreadingHTTPServer = orig
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -6,7 +6,7 @@ import io
 import json
 import sys
 import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from .detect import classify, detect_bytes
 from .layout import layout
@@ -45,7 +45,10 @@ def onnx_load(buf):
     return onnx.load(buf)
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(SimpleHTTPRequestHandler):
+    """Viewer at /, static files (generated HTML) from the launch directory."""
+    timeout = 60                          # drop dead uploads instead of waiting forever
+
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -54,6 +57,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        if self.path != "/":
+            super().do_GET()            # generated model.html files
+            return
         empty = json.dumps({"meta": {"format": "none"}, "nodes": [], "edges": []})
         html = TEMPLATE.read_text(encoding="utf-8")
         self._send(200, html.replace("__MODEL_DATA__", empty).encode(), "text/html")
@@ -84,4 +90,8 @@ def serve(port: int = 8000) -> None:
     url = f"http://localhost:{port}"
     print(f"Serving on {url}  (Ctrl+C to stop). Drop a model file on the page.")
     webbrowser.open(url)
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    # one thread per request: a slow parse never blocks other drops
+    try:
+        ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")

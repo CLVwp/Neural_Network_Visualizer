@@ -7,6 +7,7 @@
 import torch.nn as nn
 
 from ..ir import Edge, Graph, Node
+from ..stats import apply_strengths, weight_stats
 
 
 def _attrs(mod: nn.Module) -> dict:
@@ -29,6 +30,9 @@ def parse_module(model: nn.Module) -> Graph:
     running_size = 0
     for i, (name, m) in enumerate(leaves):
         a = _attrs(m)
+        w = getattr(m, "weight", None)
+        if w is not None:
+            a["weights"] = weight_stats(w)
         op = type(m).__name__
         size = a.get("out_features") or a.get("out_channels") or running_size
         if i == 0:
@@ -40,6 +44,7 @@ def parse_module(model: nn.Module) -> Graph:
         ids.append(name or f"layer_{i}")
         running_size = size
     g.edges = [Edge(s, d) for s, d in zip(ids, ids[1:])]
+    apply_strengths(g)
     g.meta["params"] = sum(p.numel() for p in model.parameters())
     return g
 
@@ -64,6 +69,7 @@ def parse_state_dict(sd: dict) -> Graph:
                                "kernel": list(w.shape[2:]), "size": w.shape[0]}
         else:
             continue
+        a["weights"] = weight_stats(w)
         if i == 0:
             ins = a["in_features"] if op == "Linear" else a["in_channels"]
             g.nodes.append(Node("in_0", "layer", "Input", attrs={"size": ins}))
@@ -71,4 +77,5 @@ def parse_state_dict(sd: dict) -> Graph:
         g.nodes.append(Node(name, "layer", op, attrs=a))
         ids.append(name)
     g.edges = [Edge(s, d) for s, d in zip(ids, ids[1:])]
+    apply_strengths(g)
     return g

@@ -6,7 +6,8 @@ It builds the graph. You rotate, zoom, and inspect every neuron and connection.
 
 Supports CNNs, MLPs, Transformers, LLMs, and VLMs.
 
-**Status: working v0.1.** PyTorch to 3D works today. The roadmap shows the full plan.
+**Status: working v0.3.** PyTorch and ONNX work today. Weights are visible.
+The roadmap shows the full plan.
 
 ## Why
 
@@ -104,13 +105,16 @@ Format detection reads the file signature. You never pick a parser by hand.
 - [x] Model type classifier: MLP / CNN / Transformer from layer statistics
 - [x] Error reports for unsupported or corrupted files
 
-### v0.3 — Make weights visible
+### v0.3 — Make weights visible ✅
 
-- [ ] Edge thickness and color mapped to weight magnitude
-- [ ] Weight distributions on node click (histogram panel)
-- [ ] Layout per layer type: CNN feature maps as 3D grids, dense layers as walls
-- [ ] Layer collapse and expand (hide neurons, keep the layer node)
-- [ ] Color themes and legend
+- [x] Edge thickness and color mapped to weight magnitude
+- [x] Weight distributions on node click (histogram panel)
+- [x] Per-neuron weight strength: neuron glow, click for `|w|` and rank
+- [x] Truthful wiring: 1:1 beams for pass-through ops, bipartite fans for weighted layers
+- [x] Layout per layer type: CNN feature maps as 3D grids, dense layers as walls
+- [x] Layer collapse and expand (hide neurons, keep the layer node)
+- [x] Selection chain (Shift+click): highlight the neurons and connections you pick
+- [x] Color themes and legend
 
 ### v0.4 — See it think (live mode)
 

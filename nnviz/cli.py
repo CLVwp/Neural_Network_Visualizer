@@ -60,9 +60,9 @@ def _cmd_load(args) -> None:
           f"{g.meta.get('params', '?')} params)")
 
 
-def _cmd_serve(_args) -> None:
+def _cmd_serve(args) -> None:
     from .server import serve
-    serve()
+    serve(args.port)
 
 
 def main(argv=None) -> None:
