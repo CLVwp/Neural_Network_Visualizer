@@ -1,6 +1,7 @@
 """Drag & drop server: serves the viewer, parses uploaded model files.
 
 POST /parse with a file body -> JSON {"graph": {...}} or {"error": "..."}.
+POST /load with {"path": "..."} -> parse a model from local disk (no upload).
 POST /run -> live mode: one forward pass on the retained module,
 JSON {"acts": [...], "output": {...}}.
 """
@@ -9,6 +10,7 @@ import json
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from .detect import classify, detect_bytes
 from .layout import layout
@@ -83,6 +85,9 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/run":
             self._run_live()
             return
+        if self.path == "/load":
+            self._load_local()
+            return
         if self.path != "/parse":
             self._send(404, b'{"error": "not found"}', "application/json")
             return
@@ -98,6 +103,22 @@ class Handler(SimpleHTTPRequestHandler):
             layout(g)
             body = json.dumps({"graph": g.to_dict()}).encode()
             self._send(200, body, "application/json")
+        except Exception as e:
+            msg = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
+            self._send(400, msg, "application/json")
+
+    def _load_local(self) -> None:
+        """Parse a model from a local path. No upload, no size limit:
+        the server runs on this machine, so it reads the disk itself."""
+        from .cli import _parse_any
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            g = _parse_any(Path(body["path"]))
+            g.meta.setdefault("model_type", classify(g))
+            layout(g)
+            _STATE["model"] = None             # disk loads never run live
+            _STATE["graph"] = None
+            self._send(200, json.dumps({"graph": g.to_dict()}).encode(), "application/json")
         except Exception as e:
             msg = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
             self._send(400, msg, "application/json")

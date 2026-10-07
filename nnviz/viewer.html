@@ -64,10 +64,19 @@
 <div id="legend"></div>
 <div id="drop">Drop to visualize</div>
 <div id="live">
-  <button id="runbtn">▶ Run</button><label class="filebtn">image
-    <input type="file" id="imgin" accept="image/*" hidden></label>
+  <div style="display:flex;gap:6px;align-items:center">
+    <input id="pathin" placeholder="path\to\model_folder or file"
+           style="flex:1;min-width:0;background:var(--bg);color:var(--text);
+                  border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+    <button id="loadbtn">Load</button>
+  </div>
+  <div style="margin-top:8px">
+    <button id="runbtn">▶ Run</button><label class="filebtn">image
+      <input type="file" id="imgin" accept="image/*" hidden></label>
+  </div>
   <div id="out"></div>
-  <div style="color:var(--sub);margin-top:6px">Run a full PyTorch model: <code>nnviz live model.pth</code></div>
+  <div style="color:var(--sub);margin-top:6px">Load reads the disk directly: no size limit.
+    Run a full PyTorch model: <code>nnviz live model.pth</code></div>
 </div>
 <div id="toast"></div>
 <script type="importmap">
@@ -553,6 +562,28 @@ async function runLive(body, ctype) {
   wave = { t0: performance.now(), end: layers.length * 350, layers };
   outEl.innerHTML = outHtml(out.output);
 }
+
+// load a model from a local path: the server reads the disk, nothing uploads
+async function loadFromDisk() {
+  const p = document.getElementById('pathin').value.trim();
+  if (!p) return;
+  try {
+    const res = await fetch('/load', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: p }) });
+    const out = await res.json();
+    if (out.error) { toastMsg(out.error); return; }
+    lodDone = false;
+    build(out.graph);
+    fillSelect();
+  } catch (e) {
+    toastMsg(`Load failed: ${e.message}`);
+  }
+}
+document.getElementById('loadbtn').onclick = loadFromDisk;
+document.getElementById('pathin').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') loadFromDisk();
+});
 
 document.getElementById('runbtn').onclick =
   () => runLive('', '').catch(e => toastMsg(`Run failed: ${e.message}`));

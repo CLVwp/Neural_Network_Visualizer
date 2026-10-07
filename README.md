@@ -137,8 +137,8 @@ Format detection reads the file signature. You never pick a parser by hand.
 The parser reads the safetensors header only. It never loads the whole
 checkpoint, so 1B+ models open fast. Weight histograms read one tensor at a
 time, with a size cap. Without `config.json` the head count is unknown.
-Then the graph shows no heads. Use `nnviz load <model folder>` for the full
-graph.
+Then the graph shows no heads. For the full graph, run `nnviz serve` and
+type the model folder path in the page. Or run `nnviz load <model folder>`.
 
 ### v0.6 — VLMs and multi-modal models
 

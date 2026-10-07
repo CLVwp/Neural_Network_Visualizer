@@ -702,6 +702,47 @@ def test_hf_parser_bfloat16_stats():
         shutil.rmtree(d)
 
 
+def test_server_load_local_folder_path():
+    """/load parses a model from a local path: no upload, no size limit,
+    config.json included, so head nodes appear."""
+    import json
+    import threading
+    import socket
+    from urllib.request import urlopen, Request
+    from urllib.error import HTTPError
+    import nnviz.server as srv
+
+    d = _tiny_hf_dir()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    real_open = srv.webbrowser.open
+    srv.webbrowser.open = lambda *a, **k: None
+    httpd = srv.ThreadingHTTPServer(("127.0.0.1", port), srv.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        body = json.dumps({"path": str(d)}).encode()
+        resp = urlopen(Request(f"http://127.0.0.1:{port}/load", data=body,
+                               headers={"Content-Type": "application/json"}), timeout=10)
+        g = json.loads(resp.read())["graph"]
+        assert any(n["kind"] == "head" for n in g["nodes"])       # config.json was read
+        assert any(n["op"] == "Embedding" for n in g["nodes"])
+
+        bad = json.dumps({"path": "Z:/does/not/exist"}).encode()
+        try:
+            urlopen(Request(f"http://127.0.0.1:{port}/load", data=bad,
+                            headers={"Content-Type": "application/json"}), timeout=10)
+            raise AssertionError("expected 400")
+        except HTTPError as e:
+            assert e.code == 400
+            assert "error" in e.read().decode()
+    finally:
+        srv._STATE["model"] = None
+        srv._STATE["graph"] = None
+        httpd.shutdown()
+        shutil.rmtree(d)
+
+
 def test_server_parses_safetensors_upload():
     import json
     import threading
@@ -726,7 +767,7 @@ def test_server_parses_safetensors_upload():
         g = json.loads(resp.read())["graph"]
         assert any(n["op"] == "Embedding" for n in g["nodes"])
         # no config.json in a bare upload: the head count is unknown, so
-        # no head nodes. Use nnviz load <dir> for the full graph.
+        # no head nodes. Use /load with a folder path for the full graph.
         assert not any(n["kind"] == "head" for n in g["nodes"])
         assert any("q_proj" in n["id"] for n in g["nodes"])
     finally:
