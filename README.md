@@ -6,7 +6,7 @@ It builds the graph. You rotate, zoom, and inspect every neuron and connection.
 
 Supports CNNs, MLPs, Transformers, LLMs, and VLMs.
 
-**Status: design phase.** The roadmap below shows the full plan.
+**Status: working v0.1.** PyTorch to 3D works today. The roadmap shows the full plan.
 
 ## Why
 
@@ -78,7 +78,7 @@ mode.
 
 | Format                  | Files                              | Status  |
 | ----------------------- | ---------------------------------- | ------- |
-| PyTorch                 | `.pt`, `.pth`, `state_dict`        | v0.1    |
+| PyTorch                 | `.pt`, `.pth`, `state_dict`        | **done** |
 | ONNX                    | `.onnx`                            | v0.2    |
 | HuggingFace             | `safetensors`, `config.json`       | v0.5    |
 | TensorFlow / Keras      | `.keras`, SavedModel               | v0.6    |
@@ -87,14 +87,14 @@ Format detection reads the file signature. You never pick a parser by hand.
 
 ## Roadmap
 
-### v0.1 — First light
+### v0.1 — First light ✅
 
-- [ ] Python package skeleton (`nnviz`)
-- [ ] PyTorch parser: MLP and CNN (`nn.Sequential`, `state_dict`)
-- [ ] IR schema: entities, relations, metadata (JSON)
-- [ ] Layout algorithm: layers as columns, neurons as points
-- [ ] 3D viewer: static graph, orbit controls, click to inspect a node
-- [ ] CLI: `nnviz load model.pth` → `model.json` → open in browser
+- [x] Python package skeleton (`nnviz`)
+- [x] PyTorch parser: MLP and CNN (`nn.Sequential`, `state_dict`)
+- [x] IR schema: entities, relations, metadata (JSON)
+- [x] Layout algorithm: layers as columns, neurons as points
+- [x] 3D viewer: static graph, orbit controls, click to inspect a node
+- [x] CLI: `nnviz model.pth` → self-contained `model.html`
 
 ### v0.2 — Import anything
 
