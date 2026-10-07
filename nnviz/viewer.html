@@ -70,13 +70,12 @@
                   border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
     <button id="loadbtn">Load</button>
   </div>
-  <div style="margin-top:8px">
-    <button id="runbtn">▶ Run</button><label class="filebtn">image
+  <div style="margin-top:8px" id="runrow">
+    <button id="runbtn">▶ Run</button><label class="filebtn" id="imgbtn">image
       <input type="file" id="imgin" accept="image/*" hidden></label>
   </div>
   <div id="out"></div>
-  <div style="color:var(--sub);margin-top:6px">Load reads the disk directly: no size limit.
-    Run a full PyTorch model: <code>nnviz live model.pth</code></div>
+  <div id="livehint" style="color:var(--sub);margin-top:6px">Load reads the disk directly: no size limit.</div>
 </div>
 <div id="toast"></div>
 <script type="importmap">
@@ -317,6 +316,12 @@ function build(data, frame = true) {
     }
   }
 
+  // context UI: offer Run and image input only when the model supports them
+  document.getElementById('runrow').style.display = data.meta.runnable ? '' : 'none';
+  document.getElementById('imgbtn').style.display = data.meta.input_image ? '' : 'none';
+  document.getElementById('livehint').textContent = data.meta.runnable
+    ? 'Run does one forward pass on the loaded model.'
+    : 'Live needs a full PyTorch nn.Module: drop one, or run nnviz live model.pth.';
   document.getElementById('meta').textContent =
     `${data.meta.format}${data.meta.model_type ? ' · ' + data.meta.model_type : ''} · ` +
     `${data.nodes.filter(n => n.kind === 'layer').length} layers · ` +

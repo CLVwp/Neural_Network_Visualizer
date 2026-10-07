@@ -702,6 +702,49 @@ def test_hf_parser_bfloat16_stats():
         shutil.rmtree(d)
 
 
+def test_parse_reports_runnable_and_input_kind():
+    """The graph meta tells the UI what the page may offer: Run only for a
+    retained nn.Module, image input only when a conv layer exists."""
+    import io
+    import json
+    import threading
+    import socket
+    from urllib.request import urlopen, Request
+    import torch
+    import nnviz.server as srv
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    real_open = srv.webbrowser.open
+    srv.webbrowser.open = lambda *a, **k: None
+    httpd = srv.ThreadingHTTPServer(("127.0.0.1", port), srv.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def drop(model):
+        buf = io.BytesIO()
+        torch.save(model, buf)
+        resp = urlopen(Request(f"http://127.0.0.1:{port}/parse", data=buf.getvalue(),
+                               headers={"Content-Type": "application/octet-stream"}), timeout=10)
+        return json.loads(resp.read())["graph"]
+
+    try:
+        cnn = drop(nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU(),
+                                 nn.Flatten(), nn.Linear(4 * 8 * 8, 2)))
+        assert cnn["meta"]["runnable"] is True
+        assert cnn["meta"]["input_image"] is True
+        mlp = drop(nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2)))
+        assert mlp["meta"]["runnable"] is True
+        assert mlp["meta"]["input_image"] is False
+        sd = drop(nn.Sequential(nn.Linear(4, 2)).state_dict())
+        assert not sd["meta"].get("runnable")          # a state_dict cannot run
+    finally:
+        srv._STATE["model"] = None
+        srv._STATE["graph"] = None
+        httpd.shutdown()
+        srv.webbrowser.open = real_open
+
+
 def test_server_load_local_folder_path():
     """/load parses a model from a local path: no upload, no size limit,
     config.json included, so head nodes appear."""
@@ -727,6 +770,7 @@ def test_server_load_local_folder_path():
         g = json.loads(resp.read())["graph"]
         assert any(n["kind"] == "head" for n in g["nodes"])       # config.json was read
         assert any(n["op"] == "Embedding" for n in g["nodes"])
+        assert not g["meta"].get("runnable")                      # weights-only: cannot run
 
         bad = json.dumps({"path": "Z:/does/not/exist"}).encode()
         try:

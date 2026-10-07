@@ -20,10 +20,22 @@ MAX_UPLOAD = 2 * 1024 ** 3  # 2 GiB: big LLM checkpoints are in scope
 _STATE = {"model": None, "graph": None}
 
 
+def _mark_runnable(g, model) -> None:
+    """Tell the UI what it may offer: Run only for a retained nn.Module,
+    image input only when a conv layer exists."""
+    if model is None:
+        return
+    import torch.nn as nn
+    g.meta["runnable"] = True
+    g.meta["input_image"] = any(isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+                                for m in model.modules())
+
+
 def live_load(graph, model) -> None:
     """Load a module + graph for live runs (nnviz live model.pth)."""
     _STATE["model"] = model
     _STATE["graph"] = graph
+    _mark_runnable(graph, model)
 
 
 def _parse_bytes(data: bytes):
@@ -100,6 +112,7 @@ class Handler(SimpleHTTPRequestHandler):
             _STATE["model"] = model          # retained for live runs
             _STATE["graph"] = None           # the client renders what it just received
             g.meta.setdefault("model_type", classify(g))
+            _mark_runnable(g, model)
             layout(g)
             body = json.dumps({"graph": g.to_dict()}).encode()
             self._send(200, body, "application/json")
