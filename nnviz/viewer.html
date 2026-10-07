@@ -17,12 +17,20 @@
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
   #meta { position: fixed; top: 12px; left: 12px; color: #8892a8; font-size: 12px;
           background: rgba(15, 20, 32, 0.92); border: 1px solid #2a3448; border-radius: 8px; padding: 8px 12px; }
+  #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+          background: rgba(11, 14, 20, 0.85); color: #7fb4ff; font-size: 22px; z-index: 10;
+          border: 3px dashed #7fb4ff; border-radius: 12px; margin: 10px; }
+  #toast { position: fixed; bottom: 12px; right: 12px; max-width: 420px; background: #3a1f24; color: #ff9d9d;
+           border: 1px solid #803a3a; border-radius: 8px; padding: 10px 14px; font-size: 12px;
+           display: none; white-space: pre-wrap; z-index: 11; }
 </style>
 </head>
 <body>
 <div id="meta"></div>
 <div id="panel"></div>
 <div id="legend"></div>
+<div id="drop">Drop to visualize</div>
+<div id="toast"></div>
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
@@ -34,8 +42,11 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const DATA = __MODEL_DATA__;
 
 const OP_COLORS = {
-  Input: 0x53d769, Conv2d: 0xff9f43, Linear: 0x4da3ff, ReLU: 0x9aa5b5,
-  Flatten: 0x6b7686, Pool: 0xc792ea, Softmax: 0xffe066, default: 0x9aa5b5,
+  Input: 0x53d769, Conv: 0xff9f43, Linear: 0x4da3ff, ReLU: 0x9aa5b5,
+  Flatten: 0x6b7686, Pool: 0xc792ea, Softmax: 0xffe066,
+  Gemm: 0x4da3ff, MatMul: 0x4da3ff, MaxPool: 0xc792ea, AveragePool: 0xc792ea,
+  Add: 0x9aa5b5, Concat: 0x9aa5b5, Reshape: 0x6b7686, Attention: 0xff6b9d,
+  default: 0x9aa5b5,
 };
 const opColor = op => OP_COLORS[op] ?? OP_COLORS[Object.keys(OP_COLORS).find(k => op.includes(k))] ?? OP_COLORS.default;
 
@@ -54,47 +65,62 @@ scene.add(key);
 
 const NODE_R = 0.45, GAP = 1.35;
 const dotGeo = new THREE.SphereGeometry(NODE_R, 12, 10);
-const dots = [];   // { mesh, node } for raycasting
+let dots = [], group = null;   // rebuilt on every load
 
-for (const node of DATA.nodes) {
-  if (node.kind !== 'layer') continue;
-  const color = opColor(node.op);
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.1 });
-  const size = Math.max(1, node.attrs.size || 1);
-  const inst = new THREE.InstancedMesh(dotGeo, mat, size);
-  const m = new THREE.Matrix4();
-  const cols = Math.ceil(Math.sqrt(size));
-  for (let i = 0; i < size; i++) {
-    const r = Math.floor(i / cols), c = i % cols;
-    // columns along X, neuron grid in the YZ plane
-    m.setPosition(node.pos[0], (r - (Math.ceil(size / cols) - 1) / 2) * GAP, (c - (cols - 1) / 2) * GAP);
-    inst.setMatrixAt(i, m);
+function build(data) {
+  if (group) scene.remove(group);
+  group = new THREE.Group();
+  scene.add(group);
+  dots = [];
+
+  for (const node of data.nodes) {
+    if (node.kind !== 'layer') continue;
+    const color = opColor(node.op);
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.1 });
+    const size = Math.max(1, node.attrs.size || 1);
+    const inst = new THREE.InstancedMesh(dotGeo, mat, size);
+    const m = new THREE.Matrix4();
+    const cols = Math.ceil(Math.sqrt(size));
+    for (let i = 0; i < size; i++) {
+      const r = Math.floor(i / cols), c = i % cols;
+      // columns along X, neuron grid in the YZ plane
+      m.setPosition(node.pos[0], (r - (Math.ceil(size / cols) - 1) / 2) * GAP, (c - (cols - 1) / 2) * GAP);
+      inst.setMatrixAt(i, m);
+    }
+    inst.userData.node = node;
+    group.add(inst);
+    dots.push(inst);
   }
-  inst.userData.node = node;
-  scene.add(inst);
-  dots.push(inst);
+
+  // one line between connected layers (layer-level links)
+  const pts = [];
+  const byId = Object.fromEntries(data.nodes.map(n => [n.id, n]));
+  for (const e of data.edges) {
+    const a = byId[e.src], b = byId[e.dst];
+    if (!a || !b) continue;
+    pts.push(new THREE.Vector3(...a.pos), new THREE.Vector3(...b.pos));
+  }
+  if (pts.length) {
+    group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),
+              new THREE.LineBasicMaterial({ color: 0x3a4a66, transparent: true, opacity: 0.7 })));
+  }
+
+  // frame the whole graph
+  const box = new THREE.Box3().setFromPoints(pts.length ? pts : [new THREE.Vector3()]);
+  const center = box.getCenter(new THREE.Vector3()), r = Math.max(box.getSize(new THREE.Vector3()).length(), 10);
+  camera.position.set(center.x + r * 0.5, r * 0.45, r * 0.9);
+  controls.target.copy(center);
+
+  document.getElementById('meta').textContent =
+    `${data.meta.format}${data.meta.model_type ? ' · ' + data.meta.model_type : ''} · ` +
+    `${data.nodes.filter(n => n.kind === 'layer').length} layers · ` +
+    `${data.edges.length} links` + (data.meta.params ? ` · ${(data.meta.params / 1e6).toFixed(2)}M params` : '');
 }
 
-// one line between consecutive connected layers (v0.1: layer-level links)
-const pts = [];
-const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
-for (const e of DATA.edges) {
-  const a = byId[e.src], b = byId[e.dst];
-  if (!a || !b) continue;
-  pts.push(new THREE.Vector3(...a.pos), new THREE.Vector3(...b.pos));
-}
-scene.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),
-          new THREE.LineBasicMaterial({ color: 0x3a4a66, transparent: true, opacity: 0.7 })));
-
-// frame the whole graph
-const box = new THREE.Box3().setFromPoints(pts.length ? pts : [new THREE.Vector3()]);
-const center = box.getCenter(new THREE.Vector3()), r = Math.max(box.getSize(new THREE.Vector3()).length(), 10);
-camera.position.set(center.x + r * 0.5, r * 0.45, r * 0.9);
-controls.target.copy(center);
+build(DATA);
 
 const panel = document.getElementById('panel');
 const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
-let selected = null;
 addEventListener('pointerdown', ev => {
   mouse.set(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(mouse, camera);
@@ -106,9 +132,34 @@ addEventListener('pointerdown', ev => {
   panel.style.display = 'block';
 });
 
-document.getElementById('meta').textContent =
-  `${DATA.meta.format} · ${DATA.nodes.filter(n => n.kind === 'layer').length} layers · ` +
-  `${DATA.edges.length} links` + (DATA.meta.params ? ` · ${(DATA.meta.params / 1e6).toFixed(2)}M params` : '');
+// drag & drop -> POST /parse -> rebuild
+const drop = document.getElementById('drop'), toast = document.getElementById('toast');
+function toastMsg(msg) {
+  toast.textContent = msg;
+  toast.style.display = 'block';
+  setTimeout(() => toast.style.display = 'none', 6000);
+}
+addEventListener('dragover', ev => { ev.preventDefault(); drop.style.display = 'flex'; });
+addEventListener('dragleave', ev => { if (ev.target === drop) drop.style.display = 'none'; });
+addEventListener('drop', async ev => {
+  ev.preventDefault();
+  drop.style.display = 'none';
+  const file = ev.dataTransfer?.files[0];
+  if (!file) return;
+  if (location.protocol === 'file:') {
+    toastMsg('Browser-side parsing needs a server. Run:  nnviz serve');
+    return;
+  }
+  try {
+    const res = await fetch('/parse', { method: 'POST', body: file });
+    const out = await res.json();
+    if (out.error) { toastMsg(out.error); return; }
+    build(out.graph);
+  } catch (e) {
+    toastMsg(`Upload failed: ${e.message}. To parse locally instead:  nnviz load <file>`);
+  }
+});
+
 document.getElementById('legend').innerHTML = Object.entries(OP_COLORS).filter(([k]) => k !== 'default')
   .map(([k, c]) => `<span class="swatch" style="background:#${c.toString(16).padStart(6, '0')}"></span>${k}</span>`).join('<br>');
 

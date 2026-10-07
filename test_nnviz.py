@@ -1,7 +1,9 @@
-"""Self-check for nnviz v0.1: parser, IR, layout. Run: python test_nnviz.py"""
+"""Self-check for nnviz. Run: python test_nnviz.py"""
+from pathlib import Path
+
 import torch.nn as nn
 
-from nnviz.parsers import parse_module
+from nnviz.parsers import parse_module, parse_onnx
 from nnviz.layout import layout
 
 
@@ -76,6 +78,84 @@ def test_render_embeds_json_and_drops_placeholder():
     html = render_html(g)
     assert "__MODEL_DATA__" not in html
     assert json.dumps(g.to_dict())[:20] in html or '"nodes"' in html
+
+
+# --- v0.2: detection, ONNX, classification ---
+
+def test_detect_format_by_content():
+    import torch
+    from nnviz.detect import detect_format
+    import onnx
+    from onnx import helper, TensorProto
+
+    torch_path = Path("tmp_detect.pth")
+    torch.save(nn.Sequential(nn.Linear(4, 2)).state_dict(), torch_path)
+    assert detect_format(torch_path) == "torch"
+
+    onnx_model = helper.make_model(
+        helper.make_graph([], "g",
+                          [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4])],
+                          [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2])]))
+    onnx_path = Path("tmp_detect.onnx")
+    onnx.save(onnx_model, onnx_path)
+    assert detect_format(onnx_path) == "onnx"
+
+    junk_path = Path("tmp_junk.bin")
+    junk_path.write_bytes(b"not a model at all")
+    assert detect_format(junk_path) == "unknown"
+
+    for p in (torch_path, onnx_path, junk_path):
+        p.unlink()
+
+
+def test_classify_model_type():
+    from nnviz.detect import classify
+    from nnviz.ir import Graph, Node
+
+    def graph(ops):
+        g = Graph()
+        g.nodes = [Node(str(i), "layer", op) for i, op in enumerate(ops)]
+        return g
+
+    assert classify(graph(["Input", "Linear", "ReLU", "Linear"])) == "MLP"
+    assert classify(graph(["Input", "Conv2d", "ReLU", "Linear"])) == "CNN"
+    assert classify(graph(["Input", "Attention", "Linear"])) == "Transformer"
+    assert classify(graph(["Input", "Gather", "Cast"])) == "other"
+
+
+def test_onnx_parser_follows_real_dag_edges():
+    import numpy as np
+    import onnx
+    from onnx import helper, TensorProto
+
+    # Conv -> Relu -> Gemm, built as a real ONNX graph
+    w_conv = helper.make_tensor("w_conv", TensorProto.FLOAT, [2, 1, 3, 3], np.zeros(18, dtype=np.float32))
+    w_gemm = helper.make_tensor("w_gemm", TensorProto.FLOAT, [4, 50], np.zeros(200, dtype=np.float32))
+    nodes = [
+        helper.make_node("Conv", ["x", "w_conv"], ["c"], kernel_shape=[3, 3]),
+        helper.make_node("Relu", ["c"], ["r"]),
+        helper.make_node("Gemm", ["r", "w_gemm"], ["y"]),
+    ]
+    graph = helper.make_graph(
+        nodes, "net",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 10, 10])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4])],
+        [w_conv, w_gemm])
+    g = parse_onnx(helper.make_model(graph))
+
+    layers = [n for n in g.nodes if n.kind == "layer"]
+    assert [n.op for n in layers] == ["Input", "Conv", "Relu", "Gemm"]
+    ids = [n.id for n in layers]
+    assert [(e.src, e.dst) for e in g.edges] == list(zip(ids, ids[1:]))
+    conv = layers[1]
+    assert conv.attrs["in_channels"] == 1
+    assert conv.attrs["out_channels"] == 2
+    gemm = layers[3]
+    assert gemm.attrs["in_features"] == 50
+    assert gemm.attrs["size"] == 4
+    # pass-through ops inherit the unit count flowing through them
+    assert layers[2].attrs["size"] == 2
+    assert g.meta["format"] == "onnx"
 
 
 if __name__ == "__main__":

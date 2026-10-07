@@ -1,40 +1,90 @@
-"""CLI: nnviz model.pth -o model.html"""
+"""CLI: nnviz model.pth -o model.html | nnviz serve"""
 import argparse
 import sys
 from pathlib import Path
 
+BANNER = r"""
+   _   _                __     __            _     _
+  | \ | | _____      __  \ \   / /_ _ _   _| |__ | | ___
+  |  \| |/ _ \ \ /\ / /___\ \ / / _` | | | | '_ \| |/ _ \
+  | |\  |  __/\ V  V /_____\ V / (_| | |_| | |_) | |  __/
+  |_| \_|\___| \_/\_/      \_/ \__,_|\__,_|_.__/|_|\___|
+  visualize any neural network in 3D
+"""
 
-def main(argv=None) -> None:
-    ap = argparse.ArgumentParser(prog="nnviz", description="Visualize a neural network in 3D.")
-    ap.add_argument("model", help="model file: .pth (nn.Module or state_dict)")
-    ap.add_argument("-o", "--out", default=None, help="output HTML (default: <model>.html)")
-    ap.add_argument("--json", default=None, help="also dump the raw IR graph as JSON")
-    args = ap.parse_args(argv)
 
+def _parse_any(path: Path):
+    """Auto-detect the format, parse with the matching parser."""
     import torch
+    from .detect import detect_format
+    from .parsers import parse_module, parse_onnx, parse_state_dict
+
+    fmt = detect_format(path)
+    if fmt == "onnx":
+        return parse_onnx(str(path))
+    if fmt == "torch":
+        try:
+            obj = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            # full nn.Module pickles need code execution; say so loudly
+            print(f"WARNING: {path} needs unsafe unpickling. "
+                  "Only load files you trust: this runs embedded code.", file=sys.stderr)
+            obj = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(obj, torch.nn.Module):
+            return parse_module(obj)
+        if isinstance(obj, dict):
+            g = parse_state_dict(obj)
+            g.meta["params"] = sum(t.numel() for t in obj.values() if hasattr(t, "numel"))
+            return g
+        sys.exit(f"Unsupported torch content in {path}: {type(obj).__name__}")
+    sys.exit(f"Unknown or unsupported format: {path}\n"
+             "Supported: PyTorch (.pth, .pt), ONNX (.onnx).")
+
+
+def _cmd_load(args) -> None:
+    from .detect import classify
     from .layout import layout
-    from .parsers import parse_module, parse_state_dict
     from .render import render_html
 
     path = Path(args.model)
-    try:
-        # safe mode: tensors only, no code execution
-        obj = torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
-        # full nn.Module pickles need code execution; say so loudly
-        print(f"WARNING: {path} needs unsafe unpickling. "
-              "Only load files you trust: this runs embedded code.", file=sys.stderr)
-        obj = torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(obj, torch.nn.Module):
-        g = parse_module(obj)
-    elif isinstance(obj, dict):
-        g = parse_state_dict(obj)
-    else:
-        sys.exit(f"Unsupported content in {path}: {type(obj).__name__}")
+    g = _parse_any(path)
+    g.meta["model_type"] = classify(g)
     layout(g)
 
     out = Path(args.out) if args.out else path.with_suffix(".html")
     out.write_text(render_html(g), encoding="utf-8")
     if args.json:
-        Path(args.json).write_text(__import__("json").dumps(g.to_dict(), indent=2), encoding="utf-8")
-    print(f"{out}  ({len(g.nodes)} layers, {g.meta.get('params', '?')} params)")
+        import json
+        Path(args.json).write_text(json.dumps(g.to_dict(), indent=2), encoding="utf-8")
+    print(f"{out}  ({g.meta['model_type']} · {len(g.nodes)} layers · "
+          f"{g.meta.get('params', '?')} params)")
+
+
+def _cmd_serve(_args) -> None:
+    from .server import serve
+    serve()
+
+
+def main(argv=None) -> None:
+    print(BANNER)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] not in ("load", "serve", "-h", "--help"):
+        argv.insert(0, "load")      # bare path: nnviz model.pth == nnviz load model.pth
+    ap = argparse.ArgumentParser(prog="nnviz", description="Visualize a neural network in 3D.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p_load = sub.add_parser("load", help="convert a model file to a 3D HTML viewer")
+    p_load.add_argument("model", help="model file: .pth / .pt / .onnx")
+    p_load.add_argument("-o", "--out", help="output HTML (default: <model>.html)")
+    p_load.add_argument("--json", help="also dump the raw IR graph as JSON")
+    p_serve = sub.add_parser("serve", help="drag & drop server: parse files in the browser")
+    p_serve.add_argument("--port", type=int, default=8000)
+    args = ap.parse_args(argv)
+
+    if args.cmd == "serve":
+        _cmd_serve(args)
+    else:
+        _cmd_load(args)
+
+
+if __name__ == "__main__":
+    main()

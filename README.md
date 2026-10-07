@@ -79,7 +79,7 @@ mode.
 | Format                  | Files                              | Status  |
 | ----------------------- | ---------------------------------- | ------- |
 | PyTorch                 | `.pt`, `.pth`, `state_dict`        | **done** |
-| ONNX                    | `.onnx`                            | v0.2    |
+| ONNX                    | `.onnx`                            | **done** |
 | HuggingFace             | `safetensors`, `config.json`       | v0.5    |
 | TensorFlow / Keras      | `.keras`, SavedModel               | v0.6    |
 
@@ -96,13 +96,13 @@ Format detection reads the file signature. You never pick a parser by hand.
 - [x] 3D viewer: static graph, orbit controls, click to inspect a node
 - [x] CLI: `nnviz model.pth` → self-contained `model.html`
 
-### v0.2 — Import anything
+### v0.2 — Import anything ✅
 
-- [ ] Format auto-detection by file signature
-- [ ] ONNX parser (graph proto → IR)
-- [ ] Drag and drop a file onto the web page
-- [ ] Model type classifier: MLP / CNN / Transformer from layer statistics
-- [ ] Error reports for unsupported or corrupted files
+- [x] Format auto-detection by file signature
+- [x] ONNX parser (graph proto → IR)
+- [x] Drag and drop a file onto the web page (`nnviz serve`)
+- [x] Model type classifier: MLP / CNN / Transformer from layer statistics
+- [x] Error reports for unsupported or corrupted files
 
 ### v0.3 — Make weights visible
 
@@ -182,12 +182,15 @@ Requires Python 3.10 or later.
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install onnx            # only if you use ONNX files
 pip install -e .
 nnviz model.pth             # writes model.html. Open it in a browser.
+nnviz serve                 # drag & drop server at localhost:8000
 ```
 
-`nnviz` accepts a pickled `nn.Module` or a `state_dict`. The output is one
-self-contained HTML file. No server and no install needed to view it.
+`nnviz` auto-detects the format. It accepts a pickled `nn.Module`, a
+`state_dict`, or an ONNX file. The output is one self-contained HTML file.
+No server and no install needed to view it.
 
 ## License
 
