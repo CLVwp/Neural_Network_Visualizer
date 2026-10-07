@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nnviz"
+version = "0.1.0"
+description = "Visualize any neural network (CNN, LLM, VLM) as an interactive 3D graph in your browser."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+nnviz = "nnviz.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nnviz*"]
+
+[tool.setuptools.package-data]
+nnviz = ["viewer.html"]

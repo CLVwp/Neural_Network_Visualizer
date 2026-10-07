@@ -13,3 +13,7 @@ node_modules/
 *.onnx
 *.safetensors
 *.keras
+
+# local artifacts
+demo_*
+.playwright-mcp/

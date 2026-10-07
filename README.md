@@ -176,13 +176,18 @@ web/
   viewer/        # Three.js viewer
 ```
 
-## Getting started (planned)
+## Getting started
+
+Requires Python 3.10 or later.
 
 ```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e .
-nnviz load model.pth        # produces model.json
-nnviz serve model.json      # opens the viewer at localhost
+nnviz model.pth             # writes model.html. Open it in a browser.
 ```
+
+`nnviz` accepts a pickled `nn.Module` or a `state_dict`. The output is one
+self-contained HTML file. No server and no install needed to view it.
 
 ## License
 
