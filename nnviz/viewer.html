@@ -30,6 +30,15 @@
   #toast { position: fixed; bottom: 12px; right: 12px; max-width: 420px; background: #3a1f24; color: #ff9d9d;
            border: 1px solid #803a3a; border-radius: 8px; padding: 10px 14px; font-size: 12px;
            display: none; white-space: pre-wrap; z-index: 11; }
+  #live { position: fixed; bottom: 12px; right: 12px; background: var(--panel); color: var(--text);
+          border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 12px;
+          display: none; z-index: 5; min-width: 240px; }
+  #live button, #live .filebtn { cursor: pointer; background: var(--accent); color: var(--bg); border: 0;
+          border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; }
+  #live .filebtn { background: var(--border); color: var(--text); margin-left: 8px; display: inline-block; }
+  .pbar { background: var(--border); border-radius: 3px; height: 8px; width: 110px; overflow: hidden; }
+  .pbar div { background: var(--accent); height: 100%; border-radius: 3px; }
+  #out { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -38,6 +47,12 @@
 <div id="panel"></div>
 <div id="legend"></div>
 <div id="drop">Drop to visualize</div>
+<div id="live">
+  <button id="runbtn">▶ Run</button><label class="filebtn">image
+    <input type="file" id="imgin" accept="image/*" hidden></label>
+  <div id="out"></div>
+  <div style="color:var(--sub);margin-top:6px">Run a full PyTorch model: <code>nnviz live model.pth</code></div>
+</div>
 <div id="toast"></div>
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
@@ -403,7 +418,67 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+// --- live mode: run a forward pass, watch activations flow layer by layer ---
+const liveEl = document.getElementById('live'), outEl = document.getElementById('out');
+if (location.protocol !== 'file:') liveEl.style.display = 'block';
+let wave = null;                        // {t0, end, layers:[{inst, t0, norm, dim, hot}]}
+const colW = new THREE.Color();
+
+function outHtml(o) {
+  const order = o.probs.map((p, i) => [i, p]).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const rows = order.map(([i, p]) =>
+    `<tr><td>class ${i}${i === o.pred ? ' ◀' : ''}</td>
+      <td><div class="pbar"><div style="width:${(p * 100).toFixed(1)}%"></div></div></td>
+      <td>${(p * 100).toFixed(1)}%</td></tr>`).join('');
+  return `<table>${rows}</table>`;
+}
+
+async function runLive(body, ctype) {
+  const res = await fetch('/run', { method: 'POST', body,
+    headers: ctype ? { 'Content-Type': ctype } : {} });
+  const out = await res.json();
+  if (out.error) { toastMsg(out.error); return; }
+  // one wave step per layer, in graph order; intensity = |activation|, per-layer max
+  const layers = [];
+  for (const { id, act } of out.acts) {
+    const inst = dots.find(d => d.userData.node?.id === id);
+    if (!inst) continue;
+    const amax = Math.max(...act.map(Math.abs), 1e-9);
+    const base = new THREE.Color(opColor(inst.userData.node.op));
+    layers.push({ inst, t0: layers.length * 350,
+                  norm: act.map(v => Math.abs(v) / amax),
+                  dim: base.clone().multiplyScalar(0.25),
+                  hot: base.clone().lerp(new THREE.Color(0xffffff), 0.9) });
+  }
+  wave = { t0: performance.now(), end: layers.length * 350, layers };
+  outEl.innerHTML = outHtml(out.output);
+}
+
+document.getElementById('runbtn').onclick =
+  () => runLive('', '').catch(e => toastMsg(`Run failed: ${e.message}`));
+document.getElementById('imgin').onchange = ev => {
+  const f = ev.target.files[0];
+  if (f) runLive(f, f.type).catch(e => toastMsg(`Run failed: ${e.message}`));
+};
+
+function waveTick() {
+  if (!wave) return;
+  const el = performance.now() - wave.t0;
+  let done = true;
+  for (const L of wave.layers) {
+    const k = Math.min(1, Math.max(0, (el - L.t0) / 300));   // 300 ms ramp per layer
+    if (k < 1) done = false;
+    if (k <= 0) continue;
+    for (let i = 0; i < L.inst.count; i++)
+      L.inst.setColorAt(i, colW.copy(L.dim).lerp(L.hot, k * L.norm[Math.min(i, L.norm.length - 1)]));
+    L.inst.instanceColor.needsUpdate = true;
+  }
+  if (done && el > wave.end + 1200) {      // hold the glow, then restore the static view
+    wave = null;
+    build(CUR, false);
+  }
+}
+renderer.setAnimationLoop(() => { waveTick(); controls.update(); renderer.render(scene, camera); });
 </script>
 </body>
 </html>

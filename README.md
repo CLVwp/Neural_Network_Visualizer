@@ -6,8 +6,8 @@ It builds the graph. You rotate, zoom, and inspect every neuron and connection.
 
 Supports CNNs, MLPs, Transformers, LLMs, and VLMs.
 
-**Status: working v0.3.** PyTorch and ONNX work today. Weights are visible.
-The roadmap shows the full plan.
+**Status: working v0.4.** PyTorch and ONNX work today. Weights and activations
+are visible. The roadmap shows the full plan.
 
 ## Why
 
@@ -116,13 +116,13 @@ Format detection reads the file signature. You never pick a parser by hand.
 - [x] Selection chain (Shift+click): highlight the neurons and connections you pick
 - [x] Color themes and legend
 
-### v0.4 — See it think (live mode)
+### v0.4 — See it think (live mode) ✅
 
-- [ ] Local server (FastAPI) that loads a model
-- [ ] WebSocket stream of activations during a forward pass
-- [ ] Animated activation wave through the graph
-- [ ] Input picker: image for a CNN, text tokens for a transformer
-- [ ] Output panel: logits, class probabilities
+- [x] Local server that loads a model (stdlib HTTP, no new dependencies)
+- [x] Activations of every layer, captured during one forward pass
+- [x] Animated activation wave through the graph
+- [x] Input picker: random noise or an image (CNN)
+- [x] Output panel: logits, class probabilities
 
 ### v0.5 — Transformers and LLMs
 
@@ -187,9 +187,11 @@ Requires Python 3.10 or later.
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install onnx            # only if you use ONNX files
+pip install pillow          # only for image input in live mode
 pip install -e .
 nnviz model.pth             # writes model.html. Open it in a browser.
 nnviz serve                 # drag & drop server at localhost:8000
+nnviz live model.pth        # live mode: run the model, watch activations
 ```
 
 `nnviz` auto-detects the format. It accepts a pickled `nn.Module`, a

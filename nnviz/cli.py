@@ -13,6 +13,18 @@ BANNER = r"""
 """
 
 
+def _torch_load(path: Path):
+    """torch.load with the loud unsafe-unpickling fallback."""
+    import torch
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        # full nn.Module pickles need code execution; say so loudly
+        print(f"WARNING: {path} needs unsafe unpickling. "
+              "Only load files you trust: this runs embedded code.", file=sys.stderr)
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def _parse_any(path: Path):
     """Auto-detect the format, parse with the matching parser."""
     import torch
@@ -23,13 +35,7 @@ def _parse_any(path: Path):
     if fmt == "onnx":
         return parse_onnx(str(path))
     if fmt == "torch":
-        try:
-            obj = torch.load(path, map_location="cpu", weights_only=True)
-        except Exception:
-            # full nn.Module pickles need code execution; say so loudly
-            print(f"WARNING: {path} needs unsafe unpickling. "
-                  "Only load files you trust: this runs embedded code.", file=sys.stderr)
-            obj = torch.load(path, map_location="cpu", weights_only=False)
+        obj = _torch_load(path)
         if isinstance(obj, torch.nn.Module):
             return parse_module(obj)
         if isinstance(obj, dict):
@@ -65,10 +71,31 @@ def _cmd_serve(args) -> None:
     serve(args.port)
 
 
+def _cmd_live(args) -> None:
+    """Live mode: load a full nn.Module, serve the viewer, run forward passes."""
+    import torch
+    from .detect import classify
+    from .layout import layout
+    from .parsers import parse_module
+    from . import server
+
+    path = Path(args.model)
+    obj = _torch_load(path)
+    if not isinstance(obj, torch.nn.Module):
+        sys.exit(f"Live mode needs a full nn.Module (a {type(obj).__name__} cannot run).")
+    g = parse_module(obj)
+    g.meta["model_type"] = classify(g)
+    layout(g)
+    server.live_load(g, obj)
+    print(f"Live model: {path}  ({g.meta['model_type']} · {len(g.nodes)} layers · "
+          f"{g.meta.get('params', '?')} params). Use the Live panel in the page.")
+    server.serve(args.port)
+
+
 def main(argv=None) -> None:
     print(BANNER)
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] not in ("load", "serve", "-h", "--help"):
+    if argv and argv[0] not in ("load", "serve", "live", "-h", "--help"):
         argv.insert(0, "load")      # bare path: nnviz model.pth == nnviz load model.pth
     ap = argparse.ArgumentParser(prog="nnviz", description="Visualize a neural network in 3D.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -78,10 +105,15 @@ def main(argv=None) -> None:
     p_load.add_argument("--json", help="also dump the raw IR graph as JSON")
     p_serve = sub.add_parser("serve", help="drag & drop server: parse files in the browser")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_live = sub.add_parser("live", help="live mode: run the model and watch activations")
+    p_live.add_argument("model", help="full PyTorch model file: .pth / .pt")
+    p_live.add_argument("--port", type=int, default=8000)
     args = ap.parse_args(argv)
 
     if args.cmd == "serve":
         _cmd_serve(args)
+    elif args.cmd == "live":
+        _cmd_live(args)
     else:
         _cmd_load(args)
 

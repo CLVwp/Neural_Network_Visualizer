@@ -316,12 +316,157 @@ def test_serve_ctrl_c_stops_quietly():
         def serve_forever(self):
             raise KeyboardInterrupt
 
-    orig = srv.ThreadingHTTPServer
+    orig_server, orig_open = srv.ThreadingHTTPServer, srv.webbrowser.open
     srv.ThreadingHTTPServer = FakeServer
+    srv.webbrowser.open = lambda *a, **k: None   # no browser tab from a test
     try:
         srv.serve(0)          # must swallow Ctrl+C, no traceback
     finally:
-        srv.ThreadingHTTPServer = orig
+        srv.ThreadingHTTPServer, srv.webbrowser.open = orig_server, orig_open
+
+
+# --- v0.4: see it think (live mode) ---
+
+def test_run_forward_captures_per_layer_activations():
+    import torch
+    from nnviz.live import run_forward
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+    x = torch.randn(1, 4)
+    r = run_forward(model, x)
+
+    acts = {a["id"]: a["act"] for a in r["acts"]}
+    assert list(acts) == ["in_0", "0", "1", "2"]     # matches graph node ids
+    assert [len(v) for v in acts.values()] == [4, 8, 8, 2]
+    # captured activations match a manual forward pass (5-decimal rounding)
+    h = model[1](model[0](x)).detach().numpy().ravel()
+    assert abs(acts["1"][0] - float(h[0])) < 1e-4
+
+
+def test_run_forward_output_logits_and_probs():
+    import torch
+    from nnviz.live import run_forward
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
+    r = run_forward(model, torch.randn(1, 4))
+    out = r["output"]
+    assert len(out["logits"]) == 3
+    assert abs(sum(out["probs"]) - 1.0) < 1e-6
+    assert all(p >= 0 for p in out["probs"])
+    assert out["pred"] == max(range(3), key=lambda i: out["probs"][i])
+
+
+def test_conv_activations_reduce_per_channel():
+    import torch
+    from nnviz.live import run_forward
+    model = nn.Sequential(nn.Conv2d(3, 5, 3), nn.ReLU())
+    r = run_forward(model, torch.randn(1, 3, 10, 10))
+    acts = {a["id"]: len(a["act"]) for a in r["acts"]}
+    assert acts == {"in_0": 3, "0": 5, "1": 5}       # one value per channel
+
+
+def test_huge_activations_capped_on_the_wire():
+    import torch
+    from nnviz.live import run_forward, MAX_ACT
+    model = nn.Sequential(nn.Linear(64, MAX_ACT * 3), nn.Flatten())
+    r = run_forward(model, torch.randn(1, 64))
+    flat = next(a for a in r["acts"] if a["id"] == "1")
+    assert len(flat["act"]) <= MAX_ACT
+
+
+def test_find_input_shape_probes_until_forward_works():
+    import torch
+    from nnviz.live import find_input_shape
+    mlp = nn.Sequential(nn.Linear(4, 8), nn.ReLU())
+    assert find_input_shape(mlp) == (1, 4)
+    # conv net whose Flatten only fits 32x32 inputs
+    cnn = nn.Sequential(
+        nn.Conv2d(3, 4, 3), nn.ReLU(), nn.Flatten(),
+        nn.Linear(4 * 30 * 30, 10))
+    assert find_input_shape(cnn) == (1, 3, 32, 32)
+
+
+def test_image_batch_resizes_and_scales():
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        print("SKIP image_batch (no pillow)")
+        return
+    import io
+    from PIL import Image
+    from nnviz.live import image_batch
+    buf = io.BytesIO()
+    Image.new("RGB", (2, 2), (255, 0, 0)).save(buf, "PNG")
+    x = image_batch((1, 3, 8, 8), buf.getvalue())
+    assert tuple(x.shape) == (1, 3, 8, 8)
+    assert float(x.min()) >= 0.0 and float(x.max()) <= 1.0
+    assert float(x[0, 0, 0, 0]) > 0.9                # red survives the resize
+
+
+def test_parse_retains_module_then_run_serves_activations():
+    import io
+    import json
+    import threading
+    import socket
+    from urllib.request import urlopen, Request
+    from urllib.error import HTTPError
+    import torch
+    import nnviz.server as srv
+
+    model = nn.Sequential(nn.Linear(4, 3), nn.ReLU())
+    buf = io.BytesIO()
+    torch.save(model, buf)
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    real_open = srv.webbrowser.open
+    srv.webbrowser.open = lambda *a, **k: None
+    httpd = srv.ThreadingHTTPServer(("127.0.0.1", port), srv.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        # drop the file: the module is retained for live runs
+        resp = urlopen(Request(f"http://127.0.0.1:{port}/parse", data=buf.getvalue(),
+                               headers={"Content-Type": "application/octet-stream"}), timeout=10)
+        assert "graph" in json.loads(resp.read())
+
+        body = json.loads(urlopen(f"http://127.0.0.1:{port}/run", data=b"", timeout=10).read())
+        assert [a["id"] for a in body["acts"]] == ["in_0", "0", "1"]
+        assert abs(sum(body["output"]["probs"]) - 1.0) < 1e-6
+
+        # with no loaded model, /run says so clearly
+        srv._STATE["model"] = None
+        try:
+            urlopen(f"http://127.0.0.1:{port}/run", data=b"", timeout=10)
+            raise AssertionError("expected 400")
+        except HTTPError as e:
+            assert e.code == 400
+            assert "nn.Module" in e.read().decode()
+    finally:
+        srv._STATE["model"] = None
+        httpd.shutdown()
+        srv.webbrowser.open = real_open
+
+
+def test_cli_live_loads_model_and_serves():
+    import torch
+    import nnviz.cli as cli
+    import nnviz.server as server
+
+    calls = {}
+    orig_serve, orig_state = server.serve, dict(server._STATE)
+    server.serve = lambda port=8000: calls.setdefault("port", port)
+    torch.save(nn.Sequential(nn.Linear(4, 2)), Path("tmp_live.pth"))
+    try:
+        cli.main(["live", "tmp_live.pth", "--port", "9123"])
+        assert calls.get("port") == 9123
+        assert server._STATE["model"] is not None
+        assert any(n.op == "Linear" for n in server._STATE["graph"].nodes)
+    finally:
+        server.serve = orig_serve
+        server._STATE.clear()
+        server._STATE.update(orig_state)
+        Path("tmp_live.pth").unlink()
 
 
 if __name__ == "__main__":
